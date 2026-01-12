@@ -1,6 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session, select
+from fastapi.responses import RedirectResponse
+from sqlalchemy.orm import Session
+from sqlalchemy import select
 from pydantic import BaseModel, EmailStr
+import httpx
+
 
 from app.db import get_db
 from app.crud_users import get_user_by_email
@@ -12,6 +16,11 @@ from app.crud_refresh import create_refresh_token, find_by_hash, revoke_token, r
 from app.schemas import TokenPair
 
 from datetime import datetime, timezone
+import os
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = "http://localhost:8000/auth/google/callback"
 
 router = APIRouter(prefix="/auth",tags=["auth"])
 
@@ -109,52 +118,82 @@ def logout(payload: RefreshReq, db: Session = Depends(get_db)):
 
 
 # -- access_token만 -- 
-@router.post("/google")
-async def google_login(payload: GoogleReq, db: Session = Depends(get_db)):
-    info = await verify_google_id_token(payload.id_token)
+# @router.post("/google")
+# async def google_login(payload: GoogleReq, db: Session = Depends(get_db)):
+#     info = await verify_google_id_token(payload.id_token)
 
-    email = info.get("email")
-    sub = info.get("sub") # google 고유 id 
-    if not email or not sub:
-        raise HTTPException(status_code=401, detail="Google token missing fields")
+#     email = info.get("email")
+#     sub = info.get("sub") # google 고유 id 
+#     if not email or not sub:
+#         raise HTTPException(status_code=401, detail="Google token missing fields")
 
 
-    # 이메일 기준으로 찾고 없으면 생성 
-    user = db.execute(select(User).where(User.email == email)).scalars().first()
-    # scalars() method는 generator이기 때문에 추가적으로 사용하는 method가 있음
+#     # 이메일 기준으로 찾고 없으면 생성 
+#     user = db.execute(select(User).where(User.email == email)).scalars().first()
+#     # scalars() method는 generator이기 때문에 추가적으로 사용하는 method가 있음
 
-    if not user:
-        user = User(
-            email = email,
-            password_hash = None,
-            provider = "google",
-            provider_sub = sub,
-            emial_verified = (info.get("email_verified") == "true" ),
-            name = info.get("name"),
-            picture = info.get("picture"), 
-        )
-        db.add(user) # 추가 
-        db.commit() 
-        db.refresh(user)   
-    else :
-        # 기존 유저 update
-        user.provider = "google"
-        user.provider_sub = sub
-        user.email_verified = (info.get("email_verified") == "true")
-        user.name = info.get("name") or user.name
-        user.picture = info.get("picture") or user.picture
-        db.commit()
+#     if not user:
+#         user = User(
+#             email = email,
+#             password_hash = None,
+#             provider = "google",
+#             provider_sub = sub,
+#             email_verified = (info.get("email_verified") == "true" ),
+#             name = info.get("name"),
+#             picture = info.get("picture"), 
+#         )
+#         db.add(user) # 추가 
+#         db.commit() 
+#         db.refresh(user)   
+#     else :
+#         # 기존 유저 update
+#         user.provider = "google"
+#         user.provider_sub = sub
+#         user.email_verified = (info.get("email_verified") == "true")
+#         user.name = info.get("name") or user.name
+#         user.picture = info.get("picture") or user.picture
+#         db.commit()
     
-    token = create_access_token(subject= str(user.id), extra= {"email" : user.email})
-    return {"access_token" : token, "token_type": "bearer"}
+#     token = create_access_token(subject= str(user.id), extra= {"email" : user.email})
+#     return {"access_token" : token, "token_type": "bearer"}
 
-
+# 1. Google 로그인 페이지로 리다이렉트
+@router.get("/google/login")
+def google_login_redirect():
+    google_auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={GOOGLE_REDIRECT_URI}"
+        "&response_type=code"
+        "&scope=openid email profile"
+        "&access_type=offline"
+    )
+    return RedirectResponse(url=google_auth_url)
 
 
 # --access token + refresh toekn 동시 관리
-@router.post("/google",response_model=TokenPair)
-async def google_login(payload: GoogleReq, db: Session = Depends(get_db)):
-    info = await verify_google_id_token(payload.id_token)
+@router.get("/google/callback")
+async def google_login(code: str, db: Session = Depends(get_db)):
+    async with httpx.AsyncClient() as client:
+        # code로 token교환
+        token_resp = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+        )
+
+    if token_resp.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to get token")
+    
+    tokens = token_resp.json()
+    id_token = tokens.get("id_token")
+    
+    info = await verify_google_id_token(id_token)
 
     email = info.get("email")
     sub = info.get("sub") # google 고유 id 
@@ -172,7 +211,7 @@ async def google_login(payload: GoogleReq, db: Session = Depends(get_db)):
             password_hash = None,
             provider = "google",
             provider_sub = sub,
-            emial_verified = (info.get("email_verified") == "true" ),
+            email_verified = (info.get("email_verified") == "true" ),
             name = info.get("name"),
             picture = info.get("picture"), 
         )
@@ -203,7 +242,12 @@ async def google_login(payload: GoogleReq, db: Session = Depends(get_db)):
     )
     
     
-    return TokenPair(access_token=access_token, refresh_token=rt["raw"])
+    return {
+        "access_token": access_token,
+        "refresh_token": rt["raw"],
+        "user": {"email": user.email, "name": user.name}
+    }
+    # return TokenPair(access_token=access_token, refresh_token=rt["raw"])
 
 
 

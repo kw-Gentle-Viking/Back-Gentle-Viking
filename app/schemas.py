@@ -19,3 +19,18 @@ class TokenPair(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+
+
+class MarketPriceCreate(BaseModel):
+    symbol: str
+    ts: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+    source: str = "KIS"
+
+class MarketPriceRead(MarketPriceCreate):
+    class Config:
+        from_attributes = True

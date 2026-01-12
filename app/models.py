@@ -6,6 +6,7 @@ from app.db import Base
 
 from typing import Optional
 
+from sqlalchemy import Float, BigInteger, PrimaryKeyConstraint, Index
 
 
 class User(Base):
@@ -17,14 +18,14 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
 
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=True)
 
     provider: Mapped[str] = mapped_column(String(32), nullable=False, default="local")
-    provider_sub : Mapped[str | None] = mapped_column(String(128), nullable= True)
+    provider_sub : Mapped[Optional[str]] = mapped_column(String(128), nullable= True)
     email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False,default=False)
 
-    name : Mapped[str | None] = mapped_column(String(128),nullable=True)
-    picture: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    name : Mapped[Optional[str]] = mapped_column(String(128),nullable=True)
+    picture: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -54,3 +55,21 @@ class RefreshToken(Base):
     #user_agent: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     #ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 Index("idx_refresh_tokens_user_id", RefreshToken.user_id)
+
+
+class MarketPrice(Base):
+    __tablename__ = "market_price"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_market_price"),
+        Index("idx_market_price_symbol_ts", "symbol", "ts"),
+    )
+
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    ts: Mapped["datetime"] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    open: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=False)
+    low:  Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="KIS")

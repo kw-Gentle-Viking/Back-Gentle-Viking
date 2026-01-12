@@ -1,7 +1,7 @@
 import os, secrets, hashlib
 from datetime import datetime, timedelta, timezone
 from jose import jwt
-
+from typing import Optional
 
 SECRET = os.getenv("JWT_SECRET", "dev-secret")
 ALG = os.getenv("JWT_ALG", "HS256")
@@ -11,7 +11,7 @@ PEPPER = os.getenv("REFRESH_TOKEN_PEPPER", "dev-pepper")
 
 
 
-def create_access_token(subject: str, extra: dict | None = None) -> str:
+def create_access_token(subject: str, extra: Optional[dict] = None) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": subject,               # 보통 user_id 또는 email
@@ -23,7 +23,7 @@ def create_access_token(subject: str, extra: dict | None = None) -> str:
         payload.update(extra)
     return jwt.encode(payload, SECRET, algorithm=ALG)
 
-def new_refresh_token_pair(user_id: int, family_id: str | None = None) -> dict:
+def new_refresh_token_pair(user_id: int, family_id: Optional[str] = None) -> dict:
     jti = secrets.token_hex(16)  # 32 chars
     fam = family_id or secrets.token_hex(16)
     raw = secrets.token_urlsafe(48)  # 충분히 길게
