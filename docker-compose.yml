@@ -1,7 +1,8 @@
 services:
-  db:
-    image: timescale/timescaledb:latest-pg16
-    container_name: tsdb
+  # 1. 운영 DB (유저, 거래, 인증)
+  app-db:
+    image: postgres:16
+    container_name: app-db
     environment:
       POSTGRES_DB: trading
       POSTGRES_USER: trader
@@ -9,7 +10,76 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - app_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # 2. 시계열 DB (원본 OHLCV, 틱데이터)
+  market-db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: market-db
+    environment:
+      POSTGRES_DB: market_data
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: traderpass
+    ports:
+      - "5433:5432"
+    volumes:
+      - market_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # 3. 학습 데이터 DB (전처리된 피처)
+  train-db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: train-db
+    environment:
+      POSTGRES_DB: train_data
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: traderpass
+    ports:
+      - "5434:5432"
+    volumes:
+      - train_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # 4. 피처 캐시 (실시간)
+  redis:
+    image: redis:7-alpine
+    container_name: feature-cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # 5. 분석/백테스트 DB
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: analytics-db
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    restart: unless-stopped
+
+  # 6. 모델 저장소
+  mlflow:
+    image: python:3.11-slim
+    container_name: mlflow
+    ports:
+      - "5001:5000" # process 5000 은 airplay 가 쓰고 있음?
+    volumes:
+      - mlflow_data:/mlflow
+    command: bash -c "pip install mlflow -q &&
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:///mlflow.db
+      --default-artifact-root ./artifacts"
+    restart: unless-stopped
 
 volumes:
-  pgdata:
+  app_data:
+  market_data:
+  train_data:
+  redis_data:
+  clickhouse_data:
+  mlflow_data:
