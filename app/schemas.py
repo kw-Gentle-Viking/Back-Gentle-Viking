@@ -34,3 +34,6 @@ class MarketPriceCreate(BaseModel):
 class MarketPriceRead(MarketPriceCreate):
     class Config:
         from_attributes = True
+
+class RecommendationResponse(BaseModel):
+    report: str

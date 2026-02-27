@@ -6,7 +6,7 @@ import app.models
 from app.routes_auth import router as auth_router
 from app.routes_users import router as users_router
 from app.routes_prices import router as prices_router
-
+from app.routes_rec import router as rec_router
 
 Base.metadata.drop_all(bind=engine)
 
@@ -21,7 +21,7 @@ app.include_router(health_router, prefix="/health")
 app.include_router(users_router, prefix="/users", tags=["users"])
 app.include_router(prices_router, prefix="/prices", tags=["prices"])
 app.include_router(auth_router)
-
+app.include_router(rec_router, prefix="/recommendation", tags=["recommendation"])
 
 @app.get("/")
 def root():
