@@ -135,10 +135,10 @@ class financeDataCollector:
         # 추후 확인 후 다시 라이브러리 사용 검토 예정 (코스피 200 + 코스닥 150 제한도 이때 다시 검토)
         try:
             # # KOSPI 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 200개
-            # df_kospi = fdr.StockListing('KOSPI')토
+            # df_kospi = fdr.StockListing('KOSPI')
             # df_kospi200 = df_kospi.sort_values('Marcap', ascending=False).head(200)
             
-            # # KOSDAQ 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 150개출
+            # # KOSDAQ 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 150개
             # df_kosdaq = fdr.StockListing('KOSDAQ')
             # df_kosdaq150 = df_kosdaq.sort_values('Marcap', ascending=False).head(150)
             
@@ -363,7 +363,7 @@ def run_gemini(client, context, market_context, persona_conf, user_deposit=0):
     : {formatted_deposit}
 
     [분석 데이터]
-    :{context}
+    : {context}
 
     [임무]
     현재 시장 상황({market_context})을 고려하여, 사용자의 자산{formatted_deposit}을 바탕으로 최적의 투자 포트폴리오 Top5을 추천하세요.
