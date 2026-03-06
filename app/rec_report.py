@@ -130,20 +130,46 @@ class financeDataCollector:
             self.broker = None
 
         # 종목 코드 매핑 로딩 (KOSPI 200 + KOSDAQ 150)
+        # 서버 요청 차단 이슈로 인해 KRX에서 직접 다운로드하는 방식으로 변경 (추후 확인 후 다시 라이브러리 사용 검토)
         try:
-            # KOSPI 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 200개
-            df_kospi = fdr.StockListing('KOSPI')
-            df_kospi200 = df_kospi.sort_values('Marcap', ascending=False).head(200)
+            # # KOSPI 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 200개
+            # df_kospi = fdr.StockListing('KOSPI')
+            # df_kospi200 = df_kospi.sort_values('Marcap', ascending=False).head(200)
             
-            # KOSDAQ 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 150개
-            df_kosdaq = fdr.StockListing('KOSDAQ')
-            df_kosdaq150 = df_kosdaq.sort_values('Marcap', ascending=False).head(150)
+            # # KOSDAQ 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 150개출
+            # df_kosdaq = fdr.StockListing('KOSDAQ')
+            # df_kosdaq150 = df_kosdaq.sort_values('Marcap', ascending=False).head(150)
             
-            # 3. 합치기
-            df_total = pd.concat([df_kospi200, df_kosdaq150])
+            # # 3. 합치기
+            # df_total = pd.concat([df_kospi200, df_kosdaq150])
             
-            self.stock_map = dict(zip(df_total['Name'], df_total['Code']))
-            print(f"✅ 종목 리스트 로딩 완료: {len(self.stock_map)}개 (KOSPI 200 + KOSDAQ 150)\n")
+            # self.stock_map = dict(zip(df_total['Name'], df_total['Code']))
+            # print(f"✅ 종목 리스트 로딩 완료: {len(self.stock_map)}개 (KOSPI 200 + KOSDAQ 150)\n")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage'
+            }
+            
+            # KRX 상장종목 엑셀 다운로드 URL
+            url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download"
+            
+            # 직접 GET 요청
+            resp = requests.get(url, headers=headers, timeout=10)
+            
+            if resp.status_code == 200:
+                # 엑셀(HTML table) 데이터를 데이터프레임으로 변환
+                df_all = pd.read_html(io.BytesIO(resp.content), header=0)[0]
+                
+                # 종목코드 6자리 포맷팅 (
+                df_all['종목코드'] = df_all['종목코드'].astype(str).str.zfill(6)
+                
+                self.stock_map = dict(zip(df_all['회사명'], df_all['종목코드']))
+                print(f"✅ 종목 로딩 성공: {len(self.stock_map)}개")
+                
+                # df_all.to_csv('stock_list_backup.csv', index=False, encoding='utf-8-sig')
+            else:
+                raise Exception(f"서버 응답 에러: {resp.status_code}")
             
         except Exception as e:
             print(f"종목 리스트 로딩 실패: {e}")
