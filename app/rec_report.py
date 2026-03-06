@@ -107,6 +107,7 @@ class financeDataCollector:
         # Geimini 연결
         try:
             self.gemini_client = genai.Client(api_key=config["GEMINI"]["API_KEY"])
+            print("✅ Gemini API 연결")
         except Exception as e:
             print(f"⚠️ Gemini 연결 실패: {e}")
 
@@ -130,10 +131,11 @@ class financeDataCollector:
             self.broker = None
 
         # 종목 코드 매핑 로딩 (KOSPI 200 + KOSDAQ 150)
-        # 서버 요청 차단 이슈로 인해 KRX에서 직접 다운로드하는 방식으로 변경 (추후 확인 후 다시 라이브러리 사용 검토)
+        # ip 차단 이슈?로 인해 KRX에서 직접 다운로드하는 방식으로 변경 (현재는 전체 종목 로딩)
+        # 추후 확인 후 다시 라이브러리 사용 검토 예정 (코스피 200 + 코스닥 150 제한도 이때 다시 검토)
         try:
             # # KOSPI 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 200개
-            # df_kospi = fdr.StockListing('KOSPI')
+            # df_kospi = fdr.StockListing('KOSPI')토
             # df_kospi200 = df_kospi.sort_values('Marcap', ascending=False).head(200)
             
             # # KOSDAQ 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 150개출
@@ -272,6 +274,21 @@ class financeDataCollector:
         except Exception as e:
             print(f"⚠️ 계좌 조회 실패: {e}")
             return 0
+        
+    # 시장 매크로 이슈 수집 (뉴스 키워드 기반)
+    def fetch_macro(self):
+        macro_keywords = ["전쟁", "금리", "환율", "유가", "원자재", "GDP", "실업률"]
+        macro_news = []
+
+        for kw in macro_keywords:
+            news = self.fetch_naver_news(kw)
+            if news:
+                for item in news[:5]: # 각 키워드당 최대 5개 뉴스만 처리
+                    clean_title= self.clean_html(item['title'])
+                    macro_news.append(clean_title)
+            time.sleep(0.1)
+
+        return " | ".join(set(macro_news)) # 중복 제거 후 연결
 
 # 뉴스 필터링 (점수 계산, 프롬프트 최적화)
 def calculate_news_score(row, weight_map):
@@ -333,20 +350,23 @@ def optimize_prompt(df_news, scout_data, persona_conf):
     return "\n".join(context_blocks)
 
 # Gemini API로 최적의 투자 포트폴리오 추천
-def run_gemini(client, context, persona_conf, user_deposit=0):
+def run_gemini(client, context, market_context, persona_conf, user_deposit=0):
     formatted_deposit = f"{user_deposit:,}원"
 
     prompt = f"""
     당신은 **{persona_conf['gemini_persona']}**입니다.
 
-    [사용자 자산 현황]
-    - 현재 매수 가능 금액(예수금): {formatted_deposit}
+    [현재 시장 전체 상황 (Macro Context)]
+    : {market_context}
+
+    [사용자 자산 현황 (예수금)]
+    : {formatted_deposit}
 
     [분석 데이터]
-    {context}
-황
+    :{context}
+
     [임무]
-    사용자의 자산({formatted_deposit})을 바탕으로 최적의 투자 포트폴리오 **Top5**을 추천하세요.
+    현재 시장 상황({market_context})을 고려하여, 사용자의 자산{formatted_deposit}을 바탕으로 최적의 투자 포트폴리오 Top5을 추천하세요.
     추천 결과에는 각 종목에 대해 **전체 자산 대비 투자 비중(%)**과 **실제 매수 가능 수량**을 반드시 포함해야 합니다.
     
     **[제한 사항]:**
@@ -354,6 +374,11 @@ def run_gemini(client, context, persona_conf, user_deposit=0):
     2. 현금 보유 비중(약 5~10%)을 남겨두는 전략도 좋습니다.
     3. 주당 가격이 사용자의 잔고보다 비싼 종목은 절대 추천하지 마세요.
     4. 사용자의 자산 규모에 맞는 '가성비'와 '안정성'을 동시에 고려하세요.
+
+    **[전쟁 및 특수 상황 대응 지침]:**
+    1. 시장이 불안정(전쟁, 유가 급등 등)하다면 보수적인 관점에서 '방어주'나 '안전자산 성격의 종목' 비중을 높이세요.
+    2. 공격적인 페르소나라도 시장 급락기에는 무리한 풀매수보다 현금 비중(20~30%) 확보를 권장하세요.
+    3. 거시 상황과 개별 종목의 재료가 상충할 경우(예: 전쟁 중인데 테마주 호재), 리스크 관점에서의 의견을 반드시 덧붙이세요.
 
     **[당신의 종목 선정 기준]:**
     "{persona_conf['criteria']}"
@@ -396,6 +421,9 @@ def get_ai_recommendation(choice: str):
         
     p_conf = PERSONA_CONFIG[choice]
     collector = financeDataCollector(CONFIG)
+    
+    # 시장 매크로 이슈 수집
+    market_status = collector.fetch_macro()
     
     # 계좌 잔고 확인 (KIS 연결 실패 시 100만원 가정)
     user_cash = collector.get_balance()
@@ -470,9 +498,9 @@ def get_ai_recommendation(choice: str):
 
     # [Step 4] Gemini 분석
     final_context = optimize_prompt(df_top, scout_list, p_conf)
-    report = run_gemini(collector.gemini_client, final_context, p_conf, user_cash)
+    report = run_gemini(collector.gemini_client, final_context, market_status, p_conf, user_cash)
 
-    # 결과 저장 (csv 파일로 저장 -> )
+    # 결과 저장 (csv 파일로 저장)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     df_top.to_csv(f'stock_analysis_{choice}_{timestamp}.csv', index=False, encoding='utf-8-sig')
 
