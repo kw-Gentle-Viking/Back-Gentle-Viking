@@ -8,6 +8,7 @@ from app.routes_users import router as users_router
 from app.routes_prices import router as prices_router
 from backtest.routes import router as backtest_router
 
+from app.routes_rec import router as rec_router
 
 # Base.metadata.drop_all(bind=engine)
 
@@ -24,6 +25,8 @@ app.include_router(prices_router, prefix="/prices", tags=["prices"])
 app.include_router(auth_router)
 
 app.include_router(backtest_router, prefix="/backtest", tags=["backtest"])
+
+app.include_router(rec_router, prefix="/recommendation", tags=["recommendation"])
 
 
 @app.get("/")
