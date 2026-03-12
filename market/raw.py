@@ -1,5 +1,3 @@
-
-
 from sqlalchemy import (
     Column,
     Integer,
@@ -124,7 +122,7 @@ class RawPriceMin15(MarketBase):
     ask_size_total: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
-class RawFlowDaily:
+class RawFlowDaily(MarketBase):
     """수급 데이터 (금액 기준)"""
 
     __tablename__ = "flow_daily"
@@ -139,7 +137,7 @@ class RawFlowDaily:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawFlowDetailed:
+class RawFlowDetailed(MarketBase):
     """기관 내 세부 주체별 순매수 (금액 기준)"""
 
     __tablename__ = "flow_detailed"
@@ -159,7 +157,7 @@ class RawFlowDetailed:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawMarketDaily:
+class RawMarketDaily(MarketBase):
     """시장/매크로 통합"""
 
     __tablename__ = "market_daily"
@@ -179,7 +177,7 @@ class RawMarketDaily:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawMacroExpansion:
+class RawMacroExpansion(MarketBase):
     """매크로 지표"""
 
     __tablename__ = "macro_expansion"
@@ -193,7 +191,7 @@ class RawMacroExpansion:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawShortLending:
+class RawShortLending(MarketBase):
     """공매도 데이터"""
 
     __tablename__ = "short_lending"
@@ -207,7 +205,7 @@ class RawShortLending:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawTickerInfo:
+class RawTickerInfo(MarketBase):
     """종목 마스터 (산업군, 섹터 등 정적 정보)"""
 
     __tablename__ = "ticker_info"
@@ -221,7 +219,7 @@ class RawTickerInfo:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawFinanceQuarterly:
+class RawFinanceQuarterly(MarketBase):
     """분기별 재무 데이터"""
 
     __tablename__ = "finance_quarterly"
@@ -243,7 +241,7 @@ class RawFinanceQuarterly:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawDailyValuation:
+class RawDailyValuation(MarketBase):
     """기업 가치 지표"""
 
     __tablename__ = "daily_valuation"
@@ -258,7 +256,7 @@ class RawDailyValuation:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawStockEvents:
+class RawStockEvents(MarketBase):
     """주요 공시 및 이벤트 (권리락, 배당락 등)"""
 
     __tablename__ = "stock_events"
@@ -276,7 +274,7 @@ class RawStockEvents:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawMarketEvents:
+class RawMarketEvents(MarketBase):
     """시장 이벤트"""
 
     __tablename__ = "market_events"
@@ -292,7 +290,7 @@ class RawMarketEvents:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawCalendar:
+class RawCalendar(MarketBase):
     """캘린더"""
 
     __tablename__ = "calendar"
@@ -306,7 +304,7 @@ class RawCalendar:
     us_holiday_name = Column(String(50))
 
 
-class RawSectorIndexDaily:
+class RawSectorIndexDaily(MarketBase):
     """KRX 섹터 지수"""
 
     __tablename__ = "sector_index_daily"
@@ -327,7 +325,7 @@ class RawSectorIndexDaily:
     created_at = Column(DateTime, default=func.now())
 
 
-class RawSectorInfo:
+class RawSectorInfo(MarketBase):
     """섹터 정보"""
 
     __tablename__ = "sector_info"

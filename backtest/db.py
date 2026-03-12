@@ -16,38 +16,41 @@ market_engine = create_engine(MARKET_DB_URL, pool_pre_ping=True)
 
 
 async def get_market_data(
-    symbol: str, start_date: str, end_date: str, timeframe: str = "1m"
+    symbol: str, start_date: str, end_date: str, timeframe: str = "1d"
 ) -> pd.DataFrame:
     """market-db에서 OHLCV 데이터 조회"""
 
-    table_name = f"ohlcv_{timeframe}"
+    table_map = {
+        "1d": "raw.price_daily",
+        "5m": "raw.price_min_05",
+        "15m": "raw.price_min_15",
+        "1m": "raw.price_min_01",
+    }
+
+    table_name = table_map.get(timeframe, "raw.price_min_01")
+    date_col = "trade_date" if timeframe == "1d" else "trade_datetime"
 
     query = text(
         f"""
-        SELECT time, open, high, low, close, volume
+        SELECT {date_col} as ts, open_price as open, high_price as high,
+               low_price as low, close_price as close, volume
         FROM {table_name}
-        WHERE symbol = :symbol
-          AND time >= :start_date
-          AND time <= :end_date
-        ORDER BY time
+        WHERE ticker = :symbol
+          AND {date_col} >= :start_date
+          AND {date_col} <= :end_date
+        ORDER BY {date_col}
     """
     )
 
-    try:
-        df = pd.read_sql(
-            query,
-            market_engine,
-            params={"symbol": symbol, "start_date": start_date, "end_date": end_date},
-        )
-
-        if not df.empty:
-            df["time"] = pd.to_datetime(df["time"])
-            df = df.set_index("time")
-
-        return df
-    except Exception as e:
-        print(f"Error loading market data: {e}")
-        return pd.DataFrame()
+    df = pd.read_sql(
+        query,
+        market_engine,
+        params={"symbol": symbol, "start_date": start_date, "end_date": end_date},
+    )
+    if not df.empty:
+        df["ts"] = pd.to_datetime(df["ts"])
+        df = df.set_index("ts")
+    return df
 
 
 async def save_to_clickhouse(result) -> bool:
@@ -116,7 +119,6 @@ async def get_from_clickhouse(
             LIMIT {limit} OFFSET {offset}
             FORMAT JSON
         """
-
         # 총 개수 조회
         count_query = f"""
             SELECT count() as total

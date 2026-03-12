@@ -37,7 +37,8 @@ class BacktestService:
         cost_cfg = CostModelCfg()
         exec_model = ExecutionModel(cost_cfg)
         risk_limits = RiskLimits(
-            max_leverage=request.max_leverage, intraday_dd_limit=request.max_drawdown
+            # max_leverage=request.max_leverage, 주식시장에서는 안 씀
+            intraday_dd_limit=request.max_drawdown
         )
         risk_mng = RiskManager(risk_limits)
 
@@ -64,7 +65,7 @@ class BacktestService:
         curve = bt.run()
 
         # 5. 성과 계산
-        perf = performance_from_curve(curve["equity"])
+        perf = performance_from_curve(curve["equity"], request.timeframe)
 
         # 6. 응답 생성
         response = BacktestResponse(
@@ -80,6 +81,8 @@ class BacktestService:
             end_date=request.end_date,
             initial_capital=request.initial_capital,
             final_equity=bt.portfolio.equity,
+            equity_curve=curve.reset_index().to_dict(orient="records"),
+            trades=bt.trades,
         )
 
         # 7. ClickHouse에 결과 저장

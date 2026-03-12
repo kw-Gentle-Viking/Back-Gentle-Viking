@@ -60,7 +60,7 @@ class Backtester:
             eq = 0.0
             raise ValueError("Stopped due to negative equity")
 
-        self.portfolio.equity = eq
+        self.portfolio.equity = int(eq)
 
     def _apply_fill(self, fill: Fill):
         pos = self.portfolio.ensure_pos(fill.symbol)
@@ -99,7 +99,7 @@ class Backtester:
         eq_curve.append({"ts": self.base_df.index[0], "equity": self.portfolio.equity})
 
         for i, (ts, row) in enumerate(self.base_df.iterrows(), start=1):
-            self._refresh_sr_if_needed(i, ts)
+            # self._refresh_sr_if_needed(i, ts)
 
             if not (1 < row["close"] < 100000):
                 break
@@ -167,14 +167,20 @@ class Backtester:
         return pd.DataFrame(self.trades).set_index("ts")
 
 
-def performance_from_curve(c_eq: pd.Series) -> Dict[str, float]:
+def performance_from_curve(c_eq: pd.Series, timeframe: str = "1d") -> Dict[str, float]:
     c = c_eq.ffill()
     ret = c.pct_change().dropna()
 
     if ret.empty:
         return {}
 
-    ann = 365 * 24 * 60  # 분 단위 연환산
+    ann_map = {
+        "1d": 252,
+        "5m": 252 * 78,
+        "15m": 252 * 26,
+        "1m": 252 * 390,
+    }
+    ann = ann_map.get(timeframe, 252)  # 분 단위 연환산
     mean = float(ret.mean() * ann)
     vol = float(ret.std(ddof=1) * math.sqrt(ann))
     sharpe = mean / (vol + 1e-12)

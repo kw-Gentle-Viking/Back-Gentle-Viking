@@ -18,13 +18,13 @@ class Side(enum.Enum):
 
 @dc.dataclass
 class Order:
-    ts : pd.Timestamp # 체결시간 
+    ts: pd.Timestamp  # 체결시간
     symbol: str
     side: Side
-    qty: int # 소수점 거래 못하게 
+    qty: int  # 소수점 거래 못하게
     order_type: OrderType
     limit_price: Optional[int] = None
-    id : Optional[int] = None
+    id: Optional[int] = None
 
 
 @dc.dataclass
@@ -33,28 +33,29 @@ class Fill:
     order_id: int
     symbol: str
     side: Side
-    qty: int 
+    qty: int
     price: int
     fee: int
     is_maker: bool
 
+
 @dc.dataclass
 class Position:
-    symbol : str
-    qty : int = 0
-    entry_price : int = 0
+    symbol: str
+    qty: int = 0
+    entry_price: int = 0
+
 
 @dc.dataclass
 class Portfolio:
-    cash : int 
-    equity : int 
-    positions: Dict[str,Position] = dc.field(default_factory=dict)
+    cash: int = 0
+    equity: int = 0
+    positions: Dict[str, Position] = dc.field(default_factory=dict)
 
-    def ensure_pos(self, symbol:str) -> Position:
+    def ensure_pos(self, symbol: str) -> Position:
         if symbol not in self.positions:
             self.positions[symbol] = Position(symbol)
         return self.positions[symbol]
-    
 
 
 @dc.dataclass
@@ -64,7 +65,6 @@ class RiskLimits:
     intraday_dd_limit: float = 0.08
     cool_down_minutes: int = 5
     per_order_notional_cap: float = 0.3
-
 
 
 class RiskManager:
@@ -80,20 +80,15 @@ class RiskManager:
         self._halt_until = ts + pd.Timedelta(minutes=self.limits.cool_down_minutes)
 
     def check_pretrade(
-        self,
-        ts: pd.Timestamp,
-        portfolio: Portfolio,
-        symbol: str,
-        order_notional: float
+        self, ts: pd.Timestamp, portfolio: Portfolio, symbol: str, order_notional: float
     ) -> bool:
         if self.is_halted(ts):
             return False
 
         total_pos_notional = sum(
-            abs(p.qty) * (p.entry_price or 0.0) 
-            for p in portfolio.positions.values()
+            abs(p.qty) * (p.entry_price or 0.0) for p in portfolio.positions.values()
         )
-        
+
         gross = total_pos_notional / max(portfolio.equity, 1e-9)
         if gross > self.limits.max_gross_exposure:
             return False
@@ -103,7 +98,7 @@ class RiskManager:
 
         sym_pos = portfolio.positions.get(symbol, Position(symbol))
         sym_exp = abs(sym_pos.qty) * (sym_pos.entry_price or 0.0)
-        
+
         if sym_exp + order_notional > self.limits.max_symbol_weight * portfolio.equity:
             return False
 

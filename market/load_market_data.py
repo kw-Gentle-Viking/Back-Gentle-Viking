@@ -49,12 +49,16 @@ def load_csv_to_db(
     # 일봉이 아닌 경우: trade_date + trade_time → trade_datetime
     if table_name != "price_daily":
         if "trade_date" in df.columns and "trade_time" in df.columns:
+            if "ticker" in df.columns:
+                df["ticker"] = df["ticker"].astype(str).str.zfill(6)
             df["trade_datetime"] = pd.to_datetime(
                 df["trade_date"].astype(str) + " " + df["trade_time"].astype(str)
             )
             df = df.drop(columns=["trade_date", "trade_time"])
     else:
         # 일봉: trade_date만 유지
+        if "ticker" in df.columns:
+            df["ticker"] = df["ticker"].astype(str).str.zfill(6)
         if "trade_date" in df.columns:
             df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
 
