@@ -8,7 +8,7 @@ from app.routes_users import router as users_router
 from app.routes_prices import router as prices_router
 
 
-Base.metadata.drop_all(bind=engine)
+#Base.metadata.drop_all(bind=engine)
 
 Base.metadata.create_all(bind=engine)
 
