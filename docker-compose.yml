@@ -1,4 +1,24 @@
 services:
+
+  api:
+    build: ./app
+    container_name: api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - app-db
+      - redis
+
+  backtest-worker:
+    build: ./backtest
+    container_name: backtest-worker
+    ports:
+      - "8001:8000"
+    depends_on:
+      - market-db
+      - clickhouse
+  
+
   # 1. 운영 DB (유저, 거래, 인증)
   app-db:
     image: postgres:16
@@ -39,7 +59,7 @@ services:
       - "5434:5432"
     volumes:
       - train_data:/var/lib/postgresql/data
-    restart: unless-stopped
+    restart: unless-stoppedd
 
   # 4. 피처 캐시 (실시간)
   redis:
