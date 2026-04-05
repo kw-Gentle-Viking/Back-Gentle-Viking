@@ -95,7 +95,7 @@ def refresh(payload: RefreshReq, request: Request, db: Session = Depends(get_db)
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
     # 만료 check
-    now = datetime.now
+    now = datetime.now()
     if stored.expires_at <= now:
         revoke_token(db, stored)
         raise HTTPException(status_code=401, detail="Refresh token expired")

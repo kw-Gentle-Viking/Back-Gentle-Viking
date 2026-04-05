@@ -183,9 +183,12 @@ pyrightconfig.json
 *.txt
 *.wpd
 *.wps
+*.dat
 
-
+docs_cache/
 MarketData/
+
+
 
 # End of https://www.toptal.com/developers/gitignore/api/python
 

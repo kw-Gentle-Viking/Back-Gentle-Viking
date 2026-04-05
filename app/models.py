@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import (
     String,
     Integer,
@@ -9,6 +9,8 @@ from sqlalchemy import (
     Boolean,
     Index,
     Date,
+    Text,
+    JSON,
 )
 
 from datetime import datetime, date
@@ -52,6 +54,58 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+    reports: Mapped[list["RecommendationReport"]] = relationship(back_populates="user")
+
+
+class Persona(Base):
+    __tablename__ = "personas"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    gemini_persona: Mapped[str] = mapped_column(String)
+    criteria: Mapped[str] = mapped_column(Text)
+    weights: Mapped[dict] = mapped_column(JSON)
+    use_value_scout: Mapped[bool] = mapped_column(Boolean)
+
+    reports: Mapped[list["RecommendationReport"]] = relationship(
+        back_populates="persona"
+    )
+
+
+class RecommendationReport(Base):
+    __tablename__ = "recommendation_reports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    persona_id: Mapped[int] = mapped_column(ForeignKey("personas.id"))
+    report: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    user: Mapped["User"] = relationship(back_populates="reports")
+    persona: Mapped["Persona"] = relationship(back_populates="reports")
+
+
+class SearchKeyword(Base):
+    __tablename__ = "search_keywords"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String)  # 호재_모맨텀, 악재_리스크 등
+    keyword: Mapped[str] = mapped_column(String)
+
+
+class ValueWatchlist(Base):
+    __tablename__ = "value_watchlist"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker_name: Mapped[str] = mapped_column(String)
+
+
+class StopWord(Base):
+    __tablename__ = "stop_words"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    word: Mapped[str] = mapped_column(String, unique=True)
 
 
 class RefreshToken(Base):

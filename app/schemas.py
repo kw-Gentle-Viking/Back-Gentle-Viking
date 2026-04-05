@@ -1,17 +1,9 @@
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, date
 from pydantic import constr
+from typing import Optional
 
 from enum import IntEnum
-
-
-class UserCreate(BaseModel):
-    name: str
-    nickname: str
-    email: EmailStr
-    phone: str
-    password: constr(min_length=8, max_length=64)  # 평문은 입력만 받고 저장은 hash로
-    birth_date: date
 
 
 class InvestmentGoal(IntEnum):
@@ -22,10 +14,10 @@ class InvestmentGoal(IntEnum):
 
 
 class InvestmentPeriod(IntEnum):
-    UNDER_3M = 1
-    THREE_TO_12M = 2
-    ONE_TO_3Y = 3
-    OVER_3Y = 4
+    UNDER_3M = 1  # 3개월 미만
+    THREE_TO_12M = 2  # 3개월에서 12개월
+    ONE_TO_3Y = 3  # 1년에서 3년
+    OVER_3Y = 4  # 3년이상
 
 
 class RiskTolerance(IntEnum):
@@ -48,18 +40,48 @@ class VolatilityPreference(IntEnum):
     HIGH = 3  # 높은 변동성
 
 
+class UserCreate(BaseModel):
+    name: str
+    nickname: str
+    email: EmailStr
+    phone: str
+    password: constr(min_length=8, max_length=64)  # 평문은 입력만 받고 저장은 hash로
+    birth_date: date
+
+    investment_goal: InvestmentGoal
+    investment_period: InvestmentPeriod
+    risk_tolerance: RiskTolerance
+    investment_experience: InvestmentExperience
+    volatility_preference: VolatilityPreference
+
+
 class UserProfileUpdate(BaseModel):
     investment_goal: InvestmentGoal
     investment_period: InvestmentPeriod
     risk_tolerance: RiskTolerance
     investment_experience: InvestmentExperience
     volatility_preference: VolatilityPreference
-    risk_score: int
 
 
 class UserRead(BaseModel):
     id: int
     email: EmailStr
+    name: Optional[str]
+    nickname: str
+    phone: str
+    birth_date: Optional[date]
+    picture: Optional[str]
+    provider: str
+    email_verified: bool
+
+    # 투자성향
+    investment_goal: Optional[int]
+    investment_period: Optional[int]
+    risk_tolerance: Optional[int]
+    investment_experience: Optional[int]
+    volatility_preference: Optional[int]
+    risk_score: Optional[int]
+
     created_at: datetime
 
     class Config:
