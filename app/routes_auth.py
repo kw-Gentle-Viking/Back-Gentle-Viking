@@ -27,7 +27,7 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = "http://localhost:8000/auth/google/callback"
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter()
 
 
 class LoginReq(BaseModel):

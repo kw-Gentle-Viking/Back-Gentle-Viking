@@ -56,6 +56,8 @@ class UserCreate(BaseModel):
 
 
 class UserProfileUpdate(BaseModel):
+    nickname: Optional[str] = None
+    phone: Optional[str] = None
     investment_goal: InvestmentGoal
     investment_period: InvestmentPeriod
     risk_tolerance: RiskTolerance
@@ -67,8 +69,8 @@ class UserRead(BaseModel):
     id: int
     email: EmailStr
     name: Optional[str]
-    nickname: str
-    phone: str
+    nickname: Optional[str] = None
+    phone: Optional[str] = None
     birth_date: Optional[date]
     picture: Optional[str]
     provider: str
@@ -112,3 +114,35 @@ class MarketPriceRead(MarketPriceCreate):
 
 class RecommendationResponse(BaseModel):
     report: str
+
+# Portfolio AI confidence + 페르소나 기반 구현
+class AllocationConfig(BaseModel):
+    max_weight: float = 0.30          # 한 종목 최대 비중 (기본 30%)
+    cash_reserve: float = 0.10        # 현금 보유 비중 (기본 10%)
+    min_confidence: float = 0.60      # 최소 확신도 (기본 60%)
+    use_persona_boost: bool = True    # 페르소나 보정 사용 여부
+
+class TickerStrategy(BaseModel):
+    ticker: str
+    strategy_id: str = "rsi_reversal"
+    params: Optional[dict] = None
+
+class TradeStartRequest(BaseModel):
+    tickers: list[str]
+    allocation: Optional[AllocationConfig] = None  # 없으면 기본값 사용
+
+
+#  추후 사용가능? 
+# class StrategyConfig(BaseModel):
+#     strategy_id: str = "rsi_reversal"  # rsi_reversal | ma_cross
+#     params: Optional[dict] = None       # 전략별 파라미터
+
+    # 예시:
+    # rsi_reversal: {"period": 14, "oversold": 30, "overbought": 70}
+    # ma_cross:     {"fast_period": 5, "slow_period": 20}
+
+
+class TradeRequest(BaseModel):
+    total_capital: int = 10_000_000
+    strategy: Optional[list[TickerStrategy]] = None
+    allocation: Optional[AllocationConfig] = None

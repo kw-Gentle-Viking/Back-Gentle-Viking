@@ -35,12 +35,12 @@ class User(Base):
     email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    nickname: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    nickname: Mapped[str] = mapped_column(String(64), unique=True, nullable=True)
 
     picture: Mapped[Optional[str]] = mapped_column(
         String(512), nullable=True
     )  # 프로필 사진? 구글에 자동 업로드하면 ?
-    phone: Mapped[str] = mapped_column(String(20), nullable=False)
+    phone: Mapped[str] = mapped_column(String(20), nullable=True)
     birth_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)  # 생년월일
 
     # 투자성향 설문
@@ -56,6 +56,10 @@ class User(Base):
     )
 
     reports: Mapped[list["RecommendationReport"]] = relationship(back_populates="user")
+    
+    baskets : Mapped[list["Basket"]] = relationship(back_populates="user") 
+    
+    trade_logs: Mapped[list["TradeLog"]] = relationship(back_populates="user")
 
 
 class Persona(Base):
@@ -161,3 +165,34 @@ class MarketPrice(Base):
     close: Mapped[float] = mapped_column(Float, nullable=False)
     volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="KIS")
+
+
+# Basket 자동매매 들어갈 종목들 임의 설정도 가능
+class Basket(Base):
+    __tablename__ = "baskets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    ticker: Mapped[str] = mapped_column(String(10))
+    ticker_name: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    user: Mapped["User"] = relationship(back_populates="baskets")
+
+class TradeLog(Base):
+    __tablename__ = "trade_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    ticker: Mapped[str] = mapped_column(String(10))
+    side: Mapped[str] = mapped_column(String(10))       # BUY | SELL
+    qty: Mapped[int] = mapped_column(Integer)
+    price: Mapped[float] = mapped_column(Float)
+    amount: Mapped[float] = mapped_column(Float)         # qty * price
+    ai_signal: Mapped[str] = mapped_column(String(10))   # AI 시그널
+    ai_confidence: Mapped[float] = mapped_column(Float)
+    strategy_id: Mapped[str] = mapped_column(String(50)) # rsi_reversal 등
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    status : Mapped[str] = mapped_column(String(10), default="FILLED") # FILLED | FAILED
+    
+    user: Mapped["User"] = relationship(back_populates="trade_logs")

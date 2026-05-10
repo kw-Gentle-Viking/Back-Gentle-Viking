@@ -44,15 +44,24 @@ def update_profile(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    risk_score = calculate_risk_score(
-        investment_goal=payload.investment_goal or current_user.investment_goal,
-        investment_period=payload.investment_period or current_user.investment_period,
-        risk_tolerance=payload.risk_tolerance or current_user.risk_tolerance,
-        investment_experience=payload.investment_experience
-        or current_user.investment_experience,
-        volatility_preference=payload.volatility_preference
-        or current_user.volatility_preference,
-    )
+    investment_fields = [
+        payload.investment_goal,
+        payload.investment_period,
+        payload.risk_tolerance,
+        payload.investment_experience,
+        payload.volatility_preference,
+    ]
+    risk_score = None 
+
+    if any(f is not None for f in investment_fields):
+        risk_score = calculate_risk_score(
+            investment_goal=payload.investment_goal or current_user.investment_goal,
+            investment_period=payload.investment_period or current_user.investment_period,
+            risk_tolerance=payload.risk_tolerance or current_user.risk_tolerance,
+            investment_experience=payload.investment_experience or current_user.investment_experience,
+            volatility_preference=payload.volatility_preference or current_user.volatility_preference,
+        )
+
     return update_user_profile(db, current_user, payload, risk_score)
 
 

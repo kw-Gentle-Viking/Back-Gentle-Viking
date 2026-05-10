@@ -10,6 +10,8 @@ from backtest.routes import router as backtest_router
 
 from app.routes_rec import router as rec_router
 
+from app.routes_basket import router as basket_router
+from app.routes_trade import router as trade_router
 # Base.metadata.drop_all(bind=engine)
 
 Base.metadata.create_all(bind=engine)
@@ -22,11 +24,14 @@ app = FastAPI(
 app.include_router(health_router, prefix="/health")
 app.include_router(users_router, prefix="/users", tags=["users"])
 app.include_router(prices_router, prefix="/prices", tags=["prices"])
-app.include_router(auth_router)
+app.include_router(auth_router,prefix="/auth", tags=["auth"])
 
 app.include_router(backtest_router, prefix="/backtest", tags=["backtest"])
 
 app.include_router(rec_router, prefix="/recommendation", tags=["recommendation"])
+
+app.include_router(basket_router, prefix="/basket", tags=["basket"])
+app.include_router(trade_router, prefix="/trade", tags=["trade"])
 
 
 @app.get("/")
