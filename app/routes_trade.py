@@ -1,6 +1,6 @@
 # app/routes_trade.py
 import asyncio
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db,SessionLocal
@@ -13,15 +13,49 @@ from pydantic import BaseModel
 from app.schemas import AllocationConfig,TickerStrategy
 from app.strategy_factory import create_strategy
 from backtest.engine.risk import Portfolio
+from typing import Optional
 
 import pandas as pd
-
+import os
+from app.kis_websocket import KISWebSocket
 
 router = APIRouter()
 
 # 유저별 자동매매 상태 저장 (메모리)
 active_tasks: dict[int, asyncio.Task] = {}
 ai_client = AIClient()
+
+import mojito
+
+def get_broker():
+    """KIS 브로커 인스턴스 생성"""
+    try:
+        return mojito.KoreaInvestment(
+            api_key=os.getenv("KIS_APP_KEY"),
+            api_secret=os.getenv("KIS_APP_SECRET"),
+            acc_no=os.getenv("KIS_ACC_NO"),
+            mock=True,
+        )
+    except Exception as e:
+        print(f" KIS 연결 실패: {e}")
+        return None
+
+broker = get_broker()
+
+def get_balance() -> int:
+    """KIS API 예수금 조회"""
+    if not broker:
+        return 10_000_000  # KIS 미연결 시 기본값
+
+    try:
+        resp = broker.fetch_balance()
+        if resp and "output2" in resp and len(resp["output2"]) > 0:
+            data = resp["output2"][0]
+            return int(data.get("nrciv_blce", data.get("dnca_tot_amt", 0)))
+        return 10_000_000
+    except Exception as e:
+        print(f"잔고 조회 실패: {e}")
+        return 10_000_000
 
 async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
     total_capital: int,
@@ -48,7 +82,17 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
     portfolio.cash = total_capital
     portfolio.equity = total_capital
 
+    ws = KISWebSocket(
+        app_key=os.getenv("KIS_APP_KEY"),
+        app_secret=os.getenv("KIS_APP_SECRET"),
+    )
+
+    ws_task = asyncio.create_task(ws.connect(tickers))
+
     try:
+
+        await asyncio.sleep(3) # 구독 완료 대기 
+
         # 1. 초기 데이터 로드 (과거 봉)
         for ticker in tickers:
             # TODO: market-db에서 최근 N개 봉 로드
@@ -81,17 +125,19 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
 
 
                 for ticker in tickers:
-                    # 새 봉 받아오기
-                    # TODO: KIS API 실시간 시세
-                    # candle = broker.fetch_price(ticker)
-                    # close = float(candle['output']['stck_prpr'])
-                    # high = float(candle['output']['stck_hgpr'])
-                    # low = float(candle['output']['stck_lwpr'])
-                    # volume = int(candle['output']['acml_vol'])
-                    close = 50000  # 더미
+
+                    market = ws.get_price(ticker)
+                    if not market:
+                        print(f" {ticker} : 시세없음 -> 스킵")
+                        continue
+
+                    close = market["price"]
+                    high = market["high"]
+                    low = market["low"]
+                    volume = market["volume"]
 
                     row = pd.Series(
-                        {"close": close, "high": close, "low": close, "volume": 0},
+                        {"close": close, "high": high, "low": low, "volume": volume},
                         name=pd.Timestamp.now(),
                     )
 
@@ -152,14 +198,14 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                         for attempt in range(MAX_RETRY):
                             try : 
                                 #TODO: KIS API 주문
-                                # resp = broker.create_order(
-                                #     symbol=ticker,
-                                #     side=order_signal,
-                                #     qty=qty,
-                                #     order_type="market",
-                                # )
-                                # if resp.get("rt_cd") != "0":
-                                #     raise Exception(resp.get("msg1"))
+                                resp = broker.create_order(
+                                    symbol=ticker,
+                                    side=order_signal,
+                                    qty=qty,
+                                    order_type="market",
+                                )
+                                if resp.get("rt_cd") != "0":
+                                    raise Exception(resp.get("msg1"))
 
                                 order_status = "FILLED"
                                 print(f"  {ticker}: {order_signal} 체결 | qty={qty} | {qty*close:,}원")
@@ -191,6 +237,8 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                 db.close()
             await asyncio.sleep(300)  # 5분 대기
     except asyncio.CancelledError:
+        await ws.disconnect()
+        ws_task.cancel()
         print(f"[User {user_id}] 자동매매 중단됨")
 
 
@@ -275,6 +323,101 @@ async def run_once(
 
 
 # routes_trade.py에 추가
+class TradeRequest(BaseModel):
+    total_capital: Optional[int] = None  # None이면 KIS에서 자동 조회
+    ticker_strategies: list[TickerStrategy] = []
+    allocation: AllocationConfig = AllocationConfig()
+
+
+@router.post("/start")
+async def start_trading(
+    payload: TradeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    
+    user_id = current_user.id
+
+    # 총 자본금: 유저가 설정했으면 그거, 아니면 KIS에서 조회
+    if payload.total_capital:
+        total_capital = payload.total_capital
+    else:
+        # TODO: KIS API로 예수금 조회
+        total_capital = get_balance()
+        total_capital = 10_000_000  # 더미
+
+    if user_id in active_tasks and not active_tasks[user_id].done():
+        return {"status": "ALREADY_RUNNING", "message": "이미 자동매매 실행 중"}
+
+    items = db.query(Basket).filter(Basket.user_id == user_id).all()
+    if not items:
+        raise HTTPException(status_code=400, detail="바구니가 비어있습니다")
+
+    tickers = [item.ticker for item in items]
+
+    task = asyncio.create_task(
+        trading_loop(
+            user_id=user_id,
+            tickers=tickers,
+            persona_id=current_user.risk_score,
+            total_capital=total_capital,
+            config=payload.allocation,
+            ticker_strategies=payload.ticker_strategies,
+        )
+    )
+    active_tasks[user_id] = task
+
+    return {
+        "status": "RUNNING",
+        "tickers": tickers,
+        "message": "자동매매 시작 (5분 주기)",
+    }
+    
+
+@router.post("/stop")
+async def stop_trading(current_user: User = Depends(get_current_user)):
+    user_id = current_user.id
+
+    if user_id in active_tasks and not active_tasks[user_id].done():
+        active_tasks[user_id].cancel()
+        del active_tasks[user_id]
+        return {"status": "STOPPED", "message": "자동매매 중단"}
+
+    return {"status": "NOT_RUNNING", "message": "실행 중인 자동매매 없음"}
+
+@router.post("/once")
+async def execute_once(
+    payload: TradeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    items = db.query(Basket).filter(Basket.user_id == current_user.id).all()
+    if not items:
+        raise HTTPException(status_code=400, detail="바구니가 비어있습니다")
+
+    tickers = [item.ticker for item in items]
+
+    results = await run_once(
+        user_id=current_user.id,
+        tickers=tickers,
+        persona_id=current_user.risk_score,
+        total_capital=payload.total_capital,
+        config=payload.allocation,
+        ticker_strategies=payload.ticker_strategies,
+    )
+
+    return {
+        "status": "ONCE",
+        "results": results,
+        "message": "1회 실행 완료",
+    }
+
+
+@router.get("/status")
+async def get_status(current_user: User = Depends(get_current_user)):
+    user_id = current_user.id
+    is_running = user_id in active_tasks and not active_tasks[user_id].done()
+    return {"status": "RUNNING" if is_running else "STOPPED"}
 
 @router.get("/history")
 def get_trade_history(
