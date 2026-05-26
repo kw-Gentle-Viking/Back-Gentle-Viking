@@ -1,6 +1,8 @@
 import os
 import re
 import time
+import json
+from pathlib import Path
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
@@ -34,9 +36,343 @@ CONFIG = {
         "API_KEY": os.getenv("KIS_APP_KEY"),
         "API_SECRET": os.getenv("KIS_APP_SECRET"),
         "ACC_NO": os.getenv("KIS_ACC_NO"),
-        "MOCK": True,  # 모의투자 여부
+        "MOCK": os.getenv("KIS_MOCK", "true").lower() == "true",
     },
 }
+
+
+DEFAULT_UNIVERSE_FILE = (
+    Path(__file__).resolve().parent / "data" / "stock_kospi200_kosdaq150.csv"
+)
+UNIVERSE_EXTENSIONS = {".csv", ".xlsx", ".xls", ".parquet"}
+PRICE_DISCREPANCY_THRESHOLD = 0.20
+
+
+def _to_int(value) -> int | None:
+    try:
+        return int(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(value) -> float | None:
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_fdr_reference_price(stock_code: str) -> dict | None:
+    try:
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=14)
+        df = fdr.DataReader(stock_code, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
+        if df is None or df.empty or "Close" not in df.columns:
+            return None
+
+        df = df.dropna(subset=["Close"])
+        if df.empty:
+            return None
+
+        latest = df.iloc[-1]
+        close = _to_int(latest["Close"])
+        if close is None or close <= 0:
+            return None
+
+        change_rate = None
+        if len(df) >= 2:
+            prev_close = _to_float(df.iloc[-2]["Close"])
+            if prev_close and prev_close > 0:
+                change_rate = round((close - prev_close) / prev_close * 100, 2)
+
+        return {
+            "price": close,
+            "change": change_rate,
+            "date": str(df.index[-1].date()),
+            "source": "FDR",
+        }
+    except Exception as e:
+        print(f"FDR 기준가 조회 실패({stock_code}): {e}")
+        return None
+
+
+def _fetch_naver_reference_price(stock_code: str) -> dict | None:
+    try:
+        url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=5)
+        resp.raise_for_status()
+        match = re.search(
+            r'<p class="no_today">.*?<span class="blind">([0-9,]+)</span>',
+            resp.text,
+            re.S,
+        )
+        if not match:
+            return None
+        price = _to_int(match.group(1))
+        if price is None or price <= 0:
+            return None
+        return {"price": price, "change": None, "date": datetime.now().date().isoformat(), "source": "NAVER"}
+    except Exception as e:
+        print(f"Naver 기준가 조회 실패({stock_code}): {e}")
+        return None
+
+
+def _fetch_consensus_reference_price(stock_code: str) -> dict | None:
+    references = [
+        ref
+        for ref in (
+            _fetch_fdr_reference_price(stock_code),
+            _fetch_naver_reference_price(stock_code),
+        )
+        if ref and ref.get("price")
+    ]
+    if not references:
+        return None
+
+    if len(references) == 1:
+        return references[0]
+
+    prices = sorted(ref["price"] for ref in references)
+    consensus_price = int(sum(prices) / len(prices))
+    source = "+".join(ref["source"] for ref in references)
+    change = next((ref.get("change") for ref in references if ref.get("change") is not None), None)
+    date = max(ref.get("date", "") for ref in references)
+    return {"price": consensus_price, "change": change, "date": date, "source": source}
+
+
+def _apply_price_guard(stock_code: str, market_data: dict) -> dict:
+    kis_price = _to_int(market_data.get("price"))
+    if kis_price is None or kis_price <= 0:
+        reference = _fetch_consensus_reference_price(stock_code)
+        if reference:
+            market_data["price"] = str(reference["price"])
+            if reference.get("change") is not None:
+                market_data["change"] = str(reference["change"])
+            market_data["price_source"] = reference["source"]
+            market_data["price_warning"] = "KIS 현재가가 비어 있어 보조 기준가로 대체했습니다."
+        return market_data
+
+    reference = _fetch_consensus_reference_price(stock_code)
+    if not reference:
+        market_data["price_source"] = "KIS"
+        market_data["price_warning"] = None
+        return market_data
+
+    reference_price = reference["price"]
+    diff_ratio = abs(kis_price - reference_price) / reference_price
+    market_data["reference_price"] = str(reference_price)
+    market_data["reference_price_source"] = reference["source"]
+    market_data["reference_price_date"] = reference["date"]
+
+    if diff_ratio > PRICE_DISCREPANCY_THRESHOLD:
+        market_data["raw_kis_price"] = str(kis_price)
+        market_data["price"] = str(reference_price)
+        if reference.get("change") is not None:
+            market_data["change"] = str(reference["change"])
+        market_data["price_source"] = reference["source"]
+        market_data["price_warning"] = (
+            f"KIS 현재가와 보조 기준가 차이가 {diff_ratio:.1%}라 보조 기준가로 대체했습니다."
+        )
+        print(
+            f"{stock_code} 가격 경고: KIS={kis_price}, "
+            f"REF={reference_price}, diff={diff_ratio:.1%}"
+        )
+    else:
+        market_data["price_source"] = "KIS"
+        market_data["price_warning"] = None
+
+    return market_data
+
+
+def _normalize_stock_code(series: pd.Series) -> pd.Series:
+    return (
+        series.astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.extract(r"(\d{6})", expand=False)
+        .fillna("")
+        .str.zfill(6)
+    )
+
+
+def _pick_column(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    normalized = {
+        str(col).strip().lower().replace(" ", "").replace("_", ""): col
+        for col in df.columns
+    }
+    for candidate in candidates:
+        key = candidate.lower().replace(" ", "").replace("_", "")
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def _xlsx_first_sheet_to_dataframe(path: Path) -> pd.DataFrame:
+    import re as _re
+    import xml.etree.ElementTree as _ET
+    from zipfile import ZipFile
+
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+    def column_index(cell_ref: str) -> int:
+        letters = _re.match(r"[A-Z]+", cell_ref).group(0)
+        index = 0
+        for letter in letters:
+            index = index * 26 + ord(letter) - ord("A") + 1
+        return index - 1
+
+    with ZipFile(path) as archive:
+        shared_strings = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = _ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for item in root.findall("m:si", ns):
+                shared_strings.append(
+                    "".join(text_node.text or "" for text_node in item.findall(".//m:t", ns))
+                )
+
+        sheet = _ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        rows = []
+        for row in sheet.findall(".//m:sheetData/m:row", ns):
+            values = []
+            for cell in row.findall("m:c", ns):
+                value_node = cell.find("m:v", ns)
+                value = "" if value_node is None else value_node.text or ""
+                if cell.get("t") == "s" and value:
+                    value = shared_strings[int(value)]
+                values.append((column_index(cell.get("r", "A1")), value))
+
+            if not values:
+                continue
+
+            row_values = [""] * (max(index for index, _ in values) + 1)
+            for index, value in values:
+                row_values[index] = value
+            rows.append(row_values)
+
+    if not rows:
+        return pd.DataFrame()
+
+    max_columns = max(len(row) for row in rows)
+    padded_rows = [row + [""] * (max_columns - len(row)) for row in rows]
+    return pd.DataFrame(padded_rows[1:], columns=padded_rows[0])
+
+
+def _read_universe_file(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() == ".csv":
+        for encoding in ("utf-8-sig", "cp949", "euc-kr"):
+            try:
+                return pd.read_csv(path, encoding=encoding)
+            except UnicodeDecodeError:
+                continue
+        return pd.read_csv(path)
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        try:
+            return pd.read_excel(path)
+        except ImportError:
+            if path.suffix.lower() == ".xlsx":
+                return _xlsx_first_sheet_to_dataframe(path)
+            raise
+    if path.suffix.lower() == ".parquet":
+        return pd.read_parquet(path)
+    raise ValueError(f"지원하지 않는 파일 형식: {path.suffix}")
+
+
+def _extract_stock_map(df: pd.DataFrame) -> dict[str, str]:
+    code_col = _pick_column(
+        df,
+        (
+            "종목코드",
+            "단축코드",
+            "코드",
+            "code",
+            "ticker",
+            "symbol",
+            "isu_srt_cd",
+        ),
+    )
+    name_col = _pick_column(
+        df,
+        (
+            "회사명",
+            "종목명",
+            "종목 이름",
+            "한글종목약명",
+            "name",
+            "ticker_name",
+            "corp_name",
+            "kor_name",
+        ),
+    )
+    if not code_col or not name_col:
+        return {}
+
+    result = df[[name_col, code_col]].copy()
+    result[name_col] = result[name_col].astype(str).str.strip()
+    result[code_col] = _normalize_stock_code(result[code_col])
+    result = result[(result[name_col] != "") & (result[code_col].str.len() == 6)]
+    return dict(zip(result[name_col], result[code_col]))
+
+
+def _local_universe_files() -> list[Path]:
+    env_file = os.getenv("STOCK_UNIVERSE_FILE")
+    if env_file:
+        path = Path(env_file).expanduser()
+        if path.is_file():
+            return [path]
+        print(f"STOCK_UNIVERSE_FILE 경로를 찾을 수 없습니다: {path}")
+
+    if DEFAULT_UNIVERSE_FILE.is_file():
+        return [DEFAULT_UNIVERSE_FILE]
+    return []
+
+
+def load_local_stock_universe() -> dict[str, str]:
+    stock_map: dict[str, str] = {}
+    loaded_files = []
+    for path in _local_universe_files():
+        try:
+            item_map = _extract_stock_map(_read_universe_file(path))
+        except Exception as e:
+            print(f"로컬 종목 파일 읽기 실패({path}): {e}")
+            continue
+        if item_map:
+            stock_map.update(item_map)
+            loaded_files.append(str(path))
+
+    if stock_map:
+        print(
+            f"로컬 종목 universe 로딩 완료: {len(stock_map)}개 "
+            f"(파일 {len(loaded_files)}개)"
+        )
+    return stock_map
+
+
+def load_fdr_top_universe() -> dict[str, str]:
+    df_kospi = fdr.StockListing("KOSPI")
+    df_kosdaq = fdr.StockListing("KOSDAQ")
+
+    df_kospi200 = df_kospi.sort_values("Marcap", ascending=False).head(200)
+    df_kosdaq150 = df_kosdaq.sort_values("Marcap", ascending=False).head(150)
+    df_total = pd.concat([df_kospi200, df_kosdaq150], ignore_index=True)
+    df_total["Code"] = df_total["Code"].astype(str).str.zfill(6)
+    return dict(zip(df_total["Name"], df_total["Code"]))
+
+
+def load_krx_all_stock_map() -> dict[str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage",
+    }
+    url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download"
+    resp = requests.get(url, headers=headers, timeout=10)
+    if resp.status_code != 200:
+        raise Exception(f"서버 응답 에러: {resp.status_code}")
+
+    import io
+
+    df_all = pd.read_html(io.BytesIO(resp.content), header=0)[0]
+    df_all["종목코드"] = df_all["종목코드"].astype(str).str.zfill(6)
+    return dict(zip(df_all["회사명"], df_all["종목코드"]))
 
 # 투자 성향별 페르소나 설정 (회원가입 시 결정될 투자 성향 반영)
 
@@ -99,6 +435,12 @@ class financeDataCollector:
         except Exception as e:
             print(f"Gemini 연결 실패: {e}")
 
+        # 네이버 검색 API 연결
+        if config["NAVER"]["CLIENT_ID"] and config["NAVER"]["SECRET"]:
+            print("네이버 검색 API 연결")
+        else:
+            print("네이버 검색 API 연결 실패: NAVER_CLIENT_ID 또는 NAVER_CLIENT_SECRET 누락")
+
         # DART 연걸
         try:
             self.dart = OpenDartReader(config["DART"]["API_KEY"])
@@ -119,51 +461,21 @@ class financeDataCollector:
             print(f"한투(KIS) API 연결 실패 : {e}")
             self.broker = None
 
-        # 종목 코드 매핑 로딩 (KOSPI 200 + KOSDAQ 150)
-        # ip 차단 이슈?로 인해 KRX에서 직접 다운로드하는 방식으로 변경 (현재는 전체 종목 로딩)
-        # 추후 확인 후 다시 라이브러리 사용 검토 예정 (코스피 200 + 코스닥 150 제한도 이때 다시 검토)
+        # 종목 코드 매핑 로딩: 로컬 KOSPI 200 + KOSDAQ 150 universe 우선 사용
+        self.stock_map = load_local_stock_universe()
+        if self.stock_map:
+            return
+
         try:
-            # # KOSPI 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 200개
-            # df_kospi = fdr.StockListing('KOSPI')
-            # df_kospi200 = df_kospi.sort_values('Marcap', ascending=False).head(200)
+            self.stock_map = load_fdr_top_universe()
+            print(f"종목 로딩 성공: {len(self.stock_map)}개 (KOSPI 200 + KOSDAQ 150)")
+            return
+        except Exception as e:
+            print(f"FDR KOSPI 200 + KOSDAQ 150 로딩 실패: {e}")
 
-            # # KOSDAQ 전체 불러오기 -> 시가총액(Marcap) 내림차순 정렬 -> 상위 150개
-            # df_kosdaq = fdr.StockListing('KOSDAQ')
-            # df_kosdaq150 = df_kosdaq.sort_values('Marcap', ascending=False).head(150)
-
-            # # 3. 합치기
-            # df_total = pd.concat([df_kospi200, df_kosdaq150])
-
-            # self.stock_map = dict(zip(df_total['Name'], df_total['Code']))
-            # print(f"종목 리스트 로딩 완료: {len(self.stock_map)}개 (KOSPI 200 + KOSDAQ 150)\n")
-
-            headers = {
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage",
-            }
-
-            # KRX 상장종목 엑셀 다운로드 URL
-            url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download"
-
-            # 직접 GET 요청
-            resp = requests.get(url, headers=headers, timeout=10)
-
-            if resp.status_code == 200:
-                import io
-
-                # 엑셀(HTML table) 데이터를 데이터프레임으로 변환
-                df_all = pd.read_html(io.BytesIO(resp.content), header=0)[0]
-
-                # 종목코드 6자리 포맷팅 (
-                df_all["종목코드"] = df_all["종목코드"].astype(str).str.zfill(6)
-
-                self.stock_map = dict(zip(df_all["회사명"], df_all["종목코드"]))
-                print(f"종목 로딩 성공: {len(self.stock_map)}개")
-
-                # df_all.to_csv('stock_list_backup.csv', index=False, encoding='utf-8-sig')
-            else:
-                raise Exception(f"서버 응답 에러: {resp.status_code}")
-
+        try:
+            self.stock_map = load_krx_all_stock_map()
+            print(f"종목 로딩 성공: {len(self.stock_map)}개 (KRX 전체 fallback)")
         except Exception as e:
             print(f"종목 리스트 로딩 실패: {e}")
             self.stock_map = {}
@@ -221,14 +533,17 @@ class financeDataCollector:
             if resp.get("rt_cd") == "0":  # 성공 시 '0' 반환
                 print(f"{stock_code} 조회 성공!")
                 d = resp["output"]
-                return {
+                market_data = {
                     "price": d["stck_prpr"],
                     "change": d["prdy_ctrt"],
                     "volume": d["acml_vol"],
                     "per": d.get("per", "N/A"),
                     "pbr": d.get("pbr", "NA"),
                     "status": "Success",
+                    "price_source": "KIS",
+                    "price_warning": None,
                 }
+                return _apply_price_guard(stock_code, market_data)
             else:
                 # 실패 시 메시지 출력
                 print(f"{stock_code} 조회 실패: {resp.get('msg1')}")
@@ -239,7 +554,7 @@ class financeDataCollector:
     # DART API로 최근 공시 정보 조회 (최근 3개월)
     def get_dart_info(self, stock_name):
         if not self.dart:
-            return "DART 미연결"
+            return {"summary": "DART 미연결", "sources": []}
 
         try:
             end_dt = datetime.now().strftime("%Y%m%d")
@@ -247,10 +562,23 @@ class financeDataCollector:
             report = self.dart.list(corp=stock_name, start=start_dt, end=end_dt)
 
             if report is not None and not report.empty:
-                return " | ".join(report["report_nm"].head(3).tolist())
-            return "최근 3개월 공시 없음"
-        except:
-            return "DART 조회 실패"
+                rows = report.head(3)
+                sources = []
+                for _, row in rows.iterrows():
+                    report_name = str(row.get("report_nm", "공시"))
+                    rcept_no = str(row.get("rcept_no", "")).strip()
+                    if rcept_no:
+                        sources.append({
+                            "label": report_name,
+                            "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}",
+                        })
+                return {
+                    "summary": " | ".join(rows["report_nm"].astype(str).tolist()),
+                    "sources": sources,
+                }
+            return {"summary": "최근 3개월 공시 없음", "sources": []}
+        except Exception as e:
+            return {"summary": f"DART 조회 실패: {e}", "sources": []}
 
     # KIS API로 계좌 잔고 및 예수금 조회
     def get_balance(self):
@@ -308,114 +636,424 @@ def calculate_news_score(row, weight_map, search_keywords):
     return score
 
 
-# 프롬프트 최적화: 뉴스 기반 종목과 스카우터 종목을 구분하여 정보 제공
+def _make_source(label: str, url: str) -> dict:
+    return {"label": str(label).strip() or "출처", "url": str(url).strip()}
+
+
+def _source_has_url(source) -> bool:
+    if isinstance(source, str):
+        return source.startswith("http://") or source.startswith("https://")
+    if isinstance(source, dict):
+        url = source.get("url") or source.get("href") or ""
+        return str(url).startswith("http://") or str(url).startswith("https://")
+    return False
+
+
+def _format_source_lines(sources: list[dict]) -> str:
+    if not sources:
+        return "- 없음"
+    return "\n".join(
+        f"- label: {source.get('label', '출처')} | url: {source.get('url', '')}"
+        for source in sources
+        if source.get("url")
+    ) or "- 없음"
+
+
+def _build_material_flow_sources(ticker: str) -> list[dict]:
+    ticker = str(ticker or "").zfill(6)
+    if not ticker or ticker == "000000":
+        return []
+    return [
+        _make_source("네이버 금융 종목 시세", f"https://finance.naver.com/item/sise.naver?code={ticker}"),
+        _make_source("네이버 금융 투자자별 매매동향", f"https://finance.naver.com/item/frgn.naver?code={ticker}"),
+    ]
+
+
+def _collect_news_sources(group: pd.DataFrame) -> list[dict]:
+    sources = []
+    for _, row in group.head(3).iterrows():
+        link = str(row.get("link", "")).strip()
+        title = str(row.get("title", "뉴스 원문")).strip()
+        if link.startswith("http://") or link.startswith("https://"):
+            sources.append(_make_source(title, link))
+    return sources
+
+
+def _extract_dart_summary(dart_data) -> str:
+    if isinstance(dart_data, dict):
+        return str(dart_data.get("summary", "데이터 없음"))
+    return str(dart_data or "데이터 없음")
+
+
+def _extract_dart_sources(dart_data) -> list[dict]:
+    if isinstance(dart_data, dict):
+        return [source for source in dart_data.get("sources", []) if _source_has_url(source)]
+    return []
+
+
+
+def enrich_report_sources(report_text: str, df_news: pd.DataFrame, scout_data: list[dict]) -> str:
+    try:
+        report_json = json.loads(report_text)
+    except Exception:
+        return report_text
+
+    news_sources_by_ticker = {}
+    dart_sources_by_ticker = {}
+
+    if "stock_code" in df_news.columns:
+        for ticker, group in df_news[df_news["stock_code"].notnull()].groupby("stock_code"):
+            ticker = str(ticker).zfill(6)
+            news_sources_by_ticker[ticker] = _collect_news_sources(group)
+            first_dart = group.iloc[0].get("dart_data")
+            dart_sources_by_ticker[ticker] = _extract_dart_sources(first_dart)
+
+    for scout in scout_data:
+        ticker = str(scout.get("code", "")).zfill(6)
+        if ticker and ticker not in news_sources_by_ticker:
+            news_sources_by_ticker[ticker] = []
+        if ticker and ticker not in dart_sources_by_ticker:
+            dart_sources_by_ticker[ticker] = []
+
+    for item in report_json.get("recommendations", []):
+        ticker = str(item.get("ticker", "")).zfill(6)
+        reasons = item.setdefault("reasons", {})
+
+        news = reasons.setdefault("news", {})
+        if not any(_source_has_url(source) for source in news.get("sources", [])):
+            news["sources"] = news_sources_by_ticker.get(ticker, [])
+
+        disclosure = reasons.setdefault("disclosure", {})
+        if not any(_source_has_url(source) for source in disclosure.get("sources", [])):
+            disclosure["sources"] = dart_sources_by_ticker.get(ticker, [])
+
+        material_flow = reasons.setdefault("materialFlow", {})
+        if not any(_source_has_url(source) for source in material_flow.get("sources", [])):
+            material_flow["sources"] = _build_material_flow_sources(ticker)
+
+    return json.dumps(report_json, ensure_ascii=False)
+
+
+# 프롬프트 최적화: 프론트 카드 렌더링에 필요한 근거를 구조화해서 제공
 def optimize_prompt(df_news, scout_data, persona_conf):
     context_blocks = []
 
-    # 뉴스 기반 발굴 종목
     news_grouped = df_news[df_news["stock_code"].notnull()].groupby("stock_code")
     for code, group in news_grouped:
         first = group.iloc[0]
         name = first["stock_name"]
         m = first["market_data"]
         d = first["dart_data"]
+        disclosure_summary = _extract_dart_summary(d)
+        disclosure_source_lines = _format_source_lines(_extract_dart_sources(d))
+        material_flow_source_lines = _format_source_lines(_build_material_flow_sources(code))
 
-        # None 체크 추가
         if not m or m.get("status") != "Success":
             continue
 
-        titles = "\n".join([f"- {row['title']}" for _, row in group.iterrows()])
-        m_txt = f"현재가: {m.get('price')}원 (등락: {m.get('change')}%) / 거래량: {m.get('volume')}"
-        val_txt = f"PER: {m.get('per')}, PBR: {m.get('pbr')}"
+        news_items = []
+        for _, row in group.head(5).iterrows():
+            news_items.append(
+                f"- title: {row['title']} | score: {row.get('score', 0)} | "
+                f"date: {row.get('pubDate', '')} | link: {row.get('link', '')}"
+            )
 
         block = f"""
-        [종목(뉴스기반): {name}]
-        1. 📰 이슈: {titles}
-        2. 📊 시세: {m_txt}
-        3. 💰 밸류: {val_txt}
-        4. 📜 공시: {d}
+        [CANDIDATE]
+        source_type: news
+        ticker: {code}
+        name: {name}
+        current_price: {m.get('price')}
+        change_rate: {m.get('change')}
+        volume: {m.get('volume')}
+        per: {m.get('per')}
+        pbr: {m.get('pbr')}
+        price_source: {m.get('price_source')}
+        price_warning: {m.get('price_warning')}
+        raw_kis_price: {m.get('raw_kis_price')}
+        reference_price: {m.get('reference_price')}
+        disclosure_recent_3m: {disclosure_summary}
+        disclosure_sources:
+        {disclosure_source_lines}
+        material_flow_sources:
+        {material_flow_source_lines}
+        related_news:
+        {chr(10).join(news_items)}
+        [/CANDIDATE]
         """
         context_blocks.append(block)
 
-    # 스카우터 발굴 종목 (가치형일 때만 존재)
     for s in scout_data:
         m = s["market_data"]
         if m["status"] != "Success":
             continue
 
         block = f"""
-        [종목(스카우트): {s['name']}]
-        1. 📰 이슈: 특이 뉴스 없음 (재무 스캔 발굴)
-        2. 📊 시세: 현재가 {m.get('price')}원 (등락 {m.get('change')}%)
-        3. 💰 밸류: PER {m.get('per')}, PBR {m.get('pbr')} (핵심 체크 포인트)
+        [CANDIDATE]
+        source_type: value_scout
+        ticker: {s.get('code', '')}
+        name: {s['name']}
+        current_price: {m.get('price')}
+        change_rate: {m.get('change')}
+        volume: {m.get('volume')}
+        per: {m.get('per')}
+        pbr: {m.get('pbr')}
+        price_source: {m.get('price_source')}
+        price_warning: {m.get('price_warning')}
+        raw_kis_price: {m.get('raw_kis_price')}
+        reference_price: {m.get('reference_price')}
+        disclosure_recent_3m: 데이터 없음
+        disclosure_sources:
+        - 없음
+        material_flow_sources:
+        {_format_source_lines(_build_material_flow_sources(s.get('code', '')))}
+        related_news:
+        - title: 특이 뉴스 없음 (재무 스캔 발굴) | score: 0 | date: | link:
+        [/CANDIDATE]
         """
         context_blocks.append(block)
 
     return "\n".join(context_blocks)
 
 
-# Gemini API로 최적의 투자 포트폴리오 추천
+def _extract_json_object(text: str) -> str:
+    text = str(text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or start > end:
+        raise ValueError("Gemini 응답에서 JSON 객체를 찾을 수 없습니다.")
+    return text[start : end + 1]
+
+
+def _parse_candidates_from_context(context: str) -> list[dict]:
+    candidates = []
+    for block in str(context or "").split("[CANDIDATE]")[1:]:
+        block = block.split("[/CANDIDATE]", 1)[0]
+        item = {}
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            if key in {
+                "source_type",
+                "ticker",
+                "name",
+                "current_price",
+                "change_rate",
+                "volume",
+                "per",
+                "pbr",
+                "price_warning",
+            }:
+                item[key] = value
+        if item.get("ticker") and item.get("name"):
+            candidates.append(item)
+    return candidates
+
+
+def _build_fallback_report(
+    persona_conf: dict,
+    user_deposit: int,
+    market_context: str,
+    context: str = "",
+    error_message: str | None = None,
+) -> str:
+    candidates = _parse_candidates_from_context(context)
+    recommendations = []
+    investable_percent = 90 if candidates else 0
+    per_stock_percent = max(1, int(investable_percent / min(len(candidates), 5))) if candidates else 0
+
+    for rank, item in enumerate(candidates[:5], start=1):
+        price = _to_int(item.get("current_price")) or 0
+        change_rate = _to_float(item.get("change_rate")) or 0
+        amount = int(user_deposit * per_stock_percent / 100) if price > 0 else 0
+        quantity = int(amount / price) if price > 0 else 0
+        warning = item.get("price_warning")
+        details = (
+            f"PER {item.get('per', 'N/A')}, PBR {item.get('pbr', 'N/A')}, "
+            f"거래량 {item.get('volume', 'N/A')} 기준으로 후보에 포함됐습니다."
+        )
+        if warning and warning != "None":
+            details += f" {warning}"
+
+        recommendations.append(
+            {
+                "rank": rank,
+                "ticker": str(item.get("ticker", "")).zfill(6),
+                "name": item.get("name", "추천 후보"),
+                "recommendationScore": max(50, 78 - (rank - 1) * 5),
+                "currentPrice": price,
+                "changeRate": change_rate,
+                "summary": "Gemini 응답 생성에 실패해 수집된 뉴스, 공시, 시세 후보 데이터 기준으로 임시 리포트를 구성했습니다.",
+                "allocation": {
+                    "weightPercent": per_stock_percent,
+                    "amountKrw": amount,
+                    "quantity": quantity,
+                },
+                "strategy": "관망" if quantity == 0 else "매수",
+                "risk": error_message or "Gemini 응답을 JSON으로 변환하지 못해 보수적인 임시 판단을 표시합니다.",
+                "reasons": {
+                    "news": {
+                        "title": "뉴스",
+                        "headline": "뉴스 기반 후보로 감지되었습니다.",
+                        "details": "네이버 검색 API로 수집한 기사에서 종목명이 탐지되어 후보군에 포함됐습니다.",
+                        "sources": [],
+                        "tags": ["뉴스 후보"],
+                    },
+                    "disclosure": {
+                        "title": "공시",
+                        "headline": "공시 데이터는 별도 확인이 필요합니다.",
+                        "details": "DART 조회 결과가 있으면 출처가 자동 보강됩니다.",
+                        "sources": [],
+                        "tags": ["확인 필요"],
+                    },
+                    "materialFlow": {
+                        "title": "재료/수급",
+                        "headline": "시세와 밸류 지표를 기준으로 임시 산출했습니다.",
+                        "details": details,
+                        "sources": _build_material_flow_sources(item.get("ticker", "")),
+                        "tags": [item.get("source_type", "candidate")],
+                    },
+                },
+            }
+        )
+
+    return json.dumps(
+        {
+            "personaName": persona_conf.get("name", "AI"),
+            "userDepositKrw": user_deposit,
+            "cashReservePercent": 100 - sum(
+                item["allocation"]["weightPercent"] for item in recommendations
+            ),
+            "marketSummary": str(market_context or "시장 요약 데이터가 부족합니다."),
+            "recommendations": recommendations,
+            "fallbackReason": error_message,
+        },
+        ensure_ascii=False,
+    )
+
+
+# Gemini API로 프론트 카드용 추천 포트폴리오 JSON 생성
 def run_gemini(client, context, market_context, persona_conf, user_deposit=0):
     formatted_deposit = f"{user_deposit:,}원"
 
     prompt = f"""
     당신은 **{persona_conf['gemini_persona']}**입니다.
 
-    [현재 시장 전체 상황 (Macro Context)]
-    : {market_context}
+    [현재 시장 전체 상황]
+    {market_context}
 
-    [사용자 자산 현황 (예수금)]
-    : {formatted_deposit}
+    [사용자 투자 가능 현금]
+    {formatted_deposit}
 
-    [분석 데이터]
-    : {context}
+    [후보 종목 데이터]
+    {context}
+
+    [사용자 투자 성향 기준]
+    {persona_conf['criteria']}
 
     [임무]
-    현재 시장 상황({market_context})을 고려하여, 사용자의 자산{formatted_deposit}을 바탕으로 최적의 투자 포트폴리오 Top5을 추천하세요.
-    추천 결과에는 각 종목에 대해 **전체 자산 대비 투자 비중(%)**과 **실제 매수 가능 수량**을 반드시 포함해야 합니다.
-    
-    **[제한 사항]:**
-    1. 5개 종목의 투자 비중 합계는 100%가 넘지 않도록 하세요.
-    2. 현금 보유 비중(약 5~10%)을 남겨두는 전략도 좋습니다.
-    3. 주당 가격이 사용자의 잔고보다 비싼 종목은 절대 추천하지 마세요.
-    4. 사용자의 자산 규모에 맞는 '가성비'와 '안정성'을 동시에 고려하세요.
+    후보 종목 데이터만 사용해서 사용자의 투자 성향에 맞는 Top 5 포트폴리오를 추천하세요.
+    프론트엔드는 추천점수/현재가/등락률 카드와 핵심 요약, 뉴스/공시/재료·수급 카드를 렌더링합니다.
+    따라서 반드시 아래 JSON 스키마 형식으로 출력하세요.
 
-    **[전쟁 및 특수 상황 대응 지침]:**
-    1. 시장이 불안정(전쟁, 유가 급등 등)하다면 보수적인 관점에서 '방어주'나 '안전자산 성격의 종목' 비중을 높이세요.
-    2. 공격적인 페르소나라도 시장 급락기에는 무리한 풀매수보다 현금 비중(20~30%) 확보를 권장하세요.
-    3. 거시 상황과 개별 종목의 재료가 상충할 경우(예: 전쟁 중인데 테마주 호재), 리스크 관점에서의 의견을 반드시 덧붙이세요.
+    [출력 규칙]
+    - 마크다운, 코드블록, 설명 문장 없이 유효한 JSON 객체만 출력하세요.
+    - 숫자는 문자열이 아니라 number로 출력하세요. 단위(원, %, 주)는 붙이지 마세요.
+    - currentPrice는 원화 현재가 number, changeRate는 퍼센트 number입니다. 예: +0.61%는 0.61
+    - recommendationScore는 0부터 100까지의 정수입니다.
+    - summary는 프로토타입의 핵심 요약 카드에 들어갈 1~2문장입니다.
+    - reasons.news/disclosure/materialFlow는 각각 프론트 카드 하나입니다.
+    - details는 1~2문장, tags는 1~3개 문자열 배열입니다.
+    - sources는 반드시 실제 URL이 있는 출처만 넣으세요. URL이 없는 출처명이나 DART/KRX 홈 링크는 넣지 마세요.
+    - disclosure 데이터가 없으면 disclosure 카드에는 "최근 확인된 주요 공시는 없습니다."처럼 솔직히 쓰세요.
+    - materialFlow 카드에는 거래량, 등락률, PER/PBR, 업종/재료 추론 중 확인 가능한 내용만 쓰세요.
+    - price_warning이 있으면 risk 또는 materialFlow.details에 가격 검증 경고를 짧게 반영하세요.
+    - 추천 비중 합계는 100 이하로 하며 현금 보유 비중도 포함하세요.
+    - 현재가가 userDepositKrw보다 큰 종목은 추천하지 마세요.
 
-    **[당신의 종목 선정 기준]:**
-    "{persona_conf['criteria']}"
+    [JSON 스키마]
+    {{
+      "personaName": "{persona_conf['name']}",
+      "userDepositKrw": {user_deposit},
+      "cashReservePercent": 0,
+      "marketSummary": "string",
+      "recommendations": [
+        {{
+          "rank": 1,
+          "ticker": "후보 종목 데이터의 ticker",
+          "name": "후보 종목 데이터의 name",
+          "recommendationScore": 0,
+          "currentPrice": 0,
+          "changeRate": 0,
+          "summary": "string",
+          "allocation": {{
+            "weightPercent": 0,
+            "amountKrw": 0,
+            "quantity": 0
+          }},
+          "strategy": "매수 | 관망 | 비중확대 | 제외",
+          "risk": "string",
+          "reasons": {{
+            "news": {{
+              "title": "뉴스",
+              "headline": "string",
+              "details": "string",
+              "sources": [{{"label": "원문 제목", "url": "https://..."}}],
+              "tags": []
+            }},
+            "disclosure": {{
+              "title": "공시",
+              "headline": "string",
+              "details": "string",
+              "sources": [],
+              "tags": []
+            }},
+            "materialFlow": {{
+              "title": "재료/수급",
+              "headline": "string",
+              "details": "string",
+              "sources": [],
+              "tags": []
+            }}
+          }}
+        }}
+      ]
+    }}
 
-    **[작성 원칙]**
-    1. 추천 사유는 반드시 **데이터(뉴스재료, PER/PBR, 거래량)**에 근거해야 합니다.
-    2. 당신의 성향에 맞지 않는 종목(예: 가치투자자인데 급등 테마주)은 과감히 제외하세요.
-    3. 뉴스에 종목명이 없더라도 내용을 보고 수혜주를 추론하세요.
-
-    [출력 양식]
-    ## 🏆 {persona_conf['name']}의 맞춤형 포트폴리오
-    ## 💰 총 투자 가능 금액:** {formatted_deposit}
-
-    ### 1. [종목명] (현재가 / 등락률)
-    * **🎯 선정 이유:** (당신의 페르소나 관점에서 분석)
-    * **📋 핵심 데이터:**
-        * {'밸류에이션' if '가치' in persona_conf['name'] else '재료/수급'}: (PER/PBR 또는 뉴스/거래량 분석)
-        * 리스크: (주의할 점)
-    * **📊 매수 가이드:**
-        - **권장 투자 금액:** 약 000,000원
-        - **권장 매수 수량:** 약 0주 (현재가 기준 계산)
-    * **📈 전략:** (매수 / 관망 / 비중확대)
-
-    ---
+    위 스키마의 ticker/name/currentPrice/changeRate 값은 예시값이 아닙니다.
+    반드시 [후보 종목 데이터]에 실제로 존재하는 종목의 ticker/name/current_price/change_rate를 변환해 채우세요.
     """
     try:
-        resp = client.models.generate_content(
-            model=CONFIG["GEMINI"]["MODEL"], contents=prompt
-        )
-        return resp.text
+        try:
+            resp = client.models.generate_content(
+                model=CONFIG["GEMINI"]["MODEL"],
+                contents=prompt,
+                config={"response_mime_type": "application/json"},
+            )
+        except TypeError:
+            resp = client.models.generate_content(
+                model=CONFIG["GEMINI"]["MODEL"], contents=prompt
+            )
+        report_text = _extract_json_object(resp.text)
+        json.loads(report_text)
+        return report_text
     except Exception as e:
-        return f"Gemini Error: {e}"
+        print(f"Gemini 리포트 생성 실패: {e}")
+        return _build_fallback_report(
+            persona_conf,
+            user_deposit,
+            market_context,
+            context,
+            error_message=f"Gemini 리포트 생성 실패: {e}",
+        )
 
 
 # 메인 함수: 투자 성향에 따른 맞춤형 포트폴리오 추천 / db버전
@@ -441,7 +1079,12 @@ def get_ai_recommendation(db: Session, user_id: int, persona_id: int) -> str:
             all_news.extend(collector.fetch_naver_news(kw))
 
     if not all_news:
-        return "현재 수집된 시장 데이터가 없어 분석을 진행할 수 없습니다."
+        return _build_fallback_report(
+            p_conf,
+            user_cash,
+            market_status,
+            error_message="현재 수집된 시장 데이터가 없어 분석을 진행할 수 없습니다.",
+        )
 
     # 데이터프레임 처리
     df = pd.DataFrame(all_news)
@@ -490,13 +1133,23 @@ def get_ai_recommendation(db: Session, user_id: int, persona_id: int) -> str:
             if v_code:
                 v_data = collector.get_market_data(v_code)
                 if v_data.get("status") == "Success":
-                    scout_list.append({"name": v_name, "market_data": v_data})
+                    scout_list.append({"name": v_name, "code": v_code, "market_data": v_data})
 
     # [Step 4] Gemini 분석
     final_context = optimize_prompt(df_top, scout_list, p_conf)
+    candidate_count = final_context.count("[CANDIDATE]")
+    candidate_lines = [
+        line.strip()
+        for line in final_context.splitlines()
+        if line.strip().startswith(("ticker:", "name:", "current_price:"))
+    ]
+    print("[AI_REPORT_DEBUG] user_cash:", user_cash)
+    print("[AI_REPORT_DEBUG] candidate_count:", candidate_count)
+    print("[AI_REPORT_DEBUG] candidates:", " | ".join(candidate_lines))
     report = run_gemini(
         collector.gemini_client, final_context, market_status, p_conf, user_cash
     )
+    report = enrich_report_sources(report, df_top, scout_list)
 
     # [Step 5] 결과 DB 저장
     save_report(db, user_id=user_id, persona_id=persona_id, report=report)
