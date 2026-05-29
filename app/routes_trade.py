@@ -8,6 +8,8 @@ from app.dependencies import get_current_user
 from app.models import User,TradeLog,Basket
 from app.ai_client import AIClient
 from app.services_allocation import allocate_portfolio
+from app.routes_ai_command import command_queue
+from datetime import datetime
 
 from pydantic import BaseModel
 from app.schemas import AllocationConfig,TickerStrategy
@@ -18,6 +20,7 @@ from typing import Optional
 import pandas as pd
 import os
 from app.kis_websocket import KISWebSocket
+
 
 router = APIRouter()
 
@@ -355,6 +358,16 @@ async def start_trading(
 
     tickers = [item.ticker for item in items]
 
+    command_queue.append({
+        "command": "START",
+        "user_id": current_user.id,
+        "tickers": tickers,
+        "created_at": datetime.now().isoformat(),
+        "status": "pending",
+    })
+
+
+
     task = asyncio.create_task(
         trading_loop(
             user_id=user_id,
@@ -382,6 +395,14 @@ async def stop_trading(current_user: User = Depends(get_current_user)):
         active_tasks[user_id].cancel()
         del active_tasks[user_id]
         return {"status": "STOPPED", "message": "자동매매 중단"}
+
+    command_queue.append({
+        "command": "STOP",
+        "user_id": current_user.id,
+        "tickers": [],
+        "created_at": datetime.now().isoformat(),
+        "status": "pending",
+    })
 
     return {"status": "NOT_RUNNING", "message": "실행 중인 자동매매 없음"}
 
