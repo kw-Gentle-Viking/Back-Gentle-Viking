@@ -7,6 +7,7 @@ import os
 
 from app.services_report import generate_report, save_report
 from app.db import SessionLocal
+from app.routes_trade import ai_signal_event
 
 router = APIRouter()
 
@@ -84,7 +85,7 @@ def receive_realtime(
     for result in payload.results:
         parsed = parse_prediction(result)
         realtime_predictions[result.ticker] = parsed
-        print(f"  📡 {result.ticker}: {parsed['signal']} "
+        print(f" {result.ticker}: {parsed['signal']} "
               f"(B:{result.prob_buy:.3f} H:{result.prob_hold:.3f} S:{result.prob_sell:.3f})")
 
     return {
@@ -118,7 +119,7 @@ def receive_once_callback(
         for result in parsed_results:
             report = generate_report(result)
             save_report(db, user_id=int(payload.user_id), persona_id=1, report=report)
-            print(f"  📝 {result['ticker']} 보고서 생성 완료")
+            print(f"  {result['ticker']} 보고서 생성 완료")
     finally:
         db.close()
 
@@ -150,3 +151,17 @@ def get_once_result(job_id: str):
     if not result:
         raise HTTPException(status_code=404, detail="결과 없음")
     return result
+
+
+@router.post("/realtime")
+def receive_realtime(payload: RealtimePayload, x_api_key: str = Header(None)):
+    verify_api_key(x_api_key)
+
+    for result in payload.results:
+        parsed = parse_prediction(result)
+        realtime_predictions[result.ticker] = parsed
+
+    # trading_loop 깨우기
+    ai_signal_event.set()
+
+    return {"status": "ok", "received": len(payload.results)}

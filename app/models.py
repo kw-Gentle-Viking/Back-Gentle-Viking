@@ -196,3 +196,17 @@ class TradeLog(Base):
     status : Mapped[str] = mapped_column(String(10), default="FILLED") # FILLED | FAILED
     
     user: Mapped["User"] = relationship(back_populates="trade_logs")
+
+
+class LiveCandle(Base):
+    __tablename__ = "live_candles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(10))
+    timeframe: Mapped[str] = mapped_column(String(5))  # 5m
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[int] = mapped_column(Integer)
+    trade_datetime: Mapped[datetime] = mapped_column(DateTime)

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db,SessionLocal
 from app.dependencies import get_current_user
-from app.models import User,TradeLog,Basket
+from app.models import User,TradeLog,Basket,LiveCandle
 from app.ai_client import AIClient
 from app.services_allocation import allocate_portfolio
 from app.routes_ai_command import command_queue
@@ -17,6 +17,8 @@ from app.strategy_factory import create_strategy
 from backtest.engine.risk import Portfolio
 from typing import Optional
 
+from app.strategy_factory import create_strategy, get_warmup_count, get_timeframe
+
 import pandas as pd
 import os
 from app.kis_websocket import KISWebSocket
@@ -27,6 +29,11 @@ router = APIRouter()
 # 유저별 자동매매 상태 저장 (메모리)
 active_tasks: dict[int, asyncio.Task] = {}
 ai_client = AIClient()
+
+ai_signal_event = asyncio.Event()
+
+warmup_events: dict[int, asyncio.Event] = {}
+
 
 import mojito
 
@@ -96,6 +103,17 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
 
         await asyncio.sleep(3) # 구독 완료 대기 
 
+
+        # ── 1. 워밍업 대기 ──────────────────────────────────────
+        print(f"[User {user_id}] 워밍업 데이터 대기 중...")
+
+        warmup_events[user_id] = asyncio.Event()
+        try:
+            await asyncio.wait_for(warmup_events[user_id].wait(), timeout=60)
+            print(f"[User {user_id}] 워밍업 데이터 수신 완료")
+        except asyncio.TimeoutError:
+            print(f"[User {user_id}] 워밍업 타임아웃")
+
         # 1. 초기 데이터 로드 (과거 봉)
         for ticker in tickers:
             # TODO: market-db에서 최근 N개 봉 로드
@@ -104,8 +122,38 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
             #     strategies[ticker].generate_orders(row, portfolio)  # 워밍업
             print(f"{ticker}: 과거 데이터 워밍업 완료")
 
+        db = SessionLocal()
+        try:
+            for ticker in tickers:
+                candles = db.query(LiveCandle)\
+                    .filter(LiveCandle.ticker == ticker)\
+                    .order_by(LiveCandle.trade_datetime.asc())\
+                    .limit(get_warmup_count(
+                        next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "rsi_reversal")
+                    )).all()
+
+                for candle in candles:
+                    row = pd.Series({
+                        "close": candle.close,
+                        "high": candle.high,
+                        "low": candle.low,
+                        "volume": candle.volume,
+                    }, name=pd.Timestamp(candle.trade_datetime))
+                    strategies[ticker].generate_orders(row, portfolio)
+
+                print(f" {ticker}: {len(candles)}개 봉 워밍업 완료")
+        finally:
+            db.close()
+
+
         # 2. 실시간 루프
         while True:
+            try:
+                await asyncio.wait_for(ai_signal_event.wait(), timeout=600)
+                ai_signal_event.clear()  # 다음 push 대기 위해 리셋
+            except asyncio.TimeoutError:
+                print(f"  AI push 10분 초과 → 스킵")
+                continue
             db = SessionLocal()
             try :
                 print(f"[User {user_id}] 자동매매 실행...")
@@ -242,7 +290,9 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
     except asyncio.CancelledError:
         await ws.disconnect()
         ws_task.cancel()
-        print(f"[User {user_id}] 자동매매 중단됨")
+        if user_id in warmup_events:
+            del warmup_events[user_id]
+        print(f" [User {user_id}] 자동매매 중단됨")
 
 
 async def run_once(

@@ -1,31 +1,48 @@
 # app/strategy_factory.py
-from backtest.strategies.rsi_reversal import RSIReversalStrategy
-from backtest.strategies.ma_cross import MACrossStrategy
+from backtest.strategies.ultra_safe import UltraSafeStrategy
+from backtest.strategies.conservative import ConservativeStrategy
+from backtest.strategies.balanced import BalancedStrategy
+from backtest.strategies.aggressive import AggressiveStrategy
 
-
-STRATEGY_DEFAULTS = {
-    "rsi_reversal": {"period": 14, "oversold": 30.0, "overbought": 70.0},
-    "ma_cross": {"fast_period": 5, "slow_period": 20},
+STRATEGY_CONFIG = {
+    "ultra_safe": {
+        "class": UltraSafeStrategy,
+        "timeframe": "5m",
+        "warmup": lambda p: 240,  # 1시간봉 20개 = 5분봉 240개
+    },
+    "conservative": {
+        "class": ConservativeStrategy,
+        "timeframe": "5m",
+        "warmup": lambda p: 63,   # 15분봉 21개 = 5분봉 63개
+    },
+    "balanced": {
+        "class": BalancedStrategy,
+        "timeframe": "5m",
+        "warmup": lambda p: 81,   # 15분봉 27개 = 5분봉 81개
+    },
+    "aggressive": {
+        "class": AggressiveStrategy,
+        "timeframe": "5m",
+        "warmup": lambda p: 21,   # 5분봉 21개만
+    },
 }
 
 
 def create_strategy(symbol: str, strategy_id: str, params: dict = None):
-    """전략 인스턴스 생성"""
-    defaults = STRATEGY_DEFAULTS.get(strategy_id, {})
-    merged = {**defaults, **(params or {})}
+    cfg = STRATEGY_CONFIG.get(strategy_id)
+    if not cfg:
+        cfg = STRATEGY_CONFIG["conservative"]
+    return cfg["class"](symbol=symbol)
 
-    if strategy_id == "rsi_reversal":
-        return RSIReversalStrategy(
-            symbol=symbol,
-            period=merged["period"],
-            oversold=merged["oversold"],
-            overbought=merged["overbought"],
-        )
-    elif strategy_id == "ma_cross":
-        return MACrossStrategy(
-            symbol=symbol,
-            fast_period=merged["fast_period"],
-            slow_period=merged["slow_period"],
-        )
-    else:
-        raise ValueError(f"Unknown strategy: {strategy_id}")
+
+def get_warmup_count(strategy_id: str, params: dict = None) -> int:
+    cfg = STRATEGY_CONFIG.get(strategy_id, {})
+    calc = cfg.get("warmup", lambda p: 50)
+    return calc(params or {})
+
+
+def get_timeframe(strategy_id: str) -> str:
+    cfg = STRATEGY_CONFIG.get(strategy_id, {})
+    return cfg.get("timeframe", "5m")
+
+## multiframe 전략으로 진화 시킬 것 
