@@ -2,7 +2,11 @@ import os
 from typing import Optional, Tuple, List, Dict, Any
 import pandas as pd
 from sqlalchemy import create_engine, text
-from datetime import datetime
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL", "postgresql://trader:traderpass@localhost:5432/trading"
+)
 
 MARKET_DB_URL = os.getenv(
     "MARKET_DB_URL", "postgresql://trader:traderpass@localhost:5433/market_data"
@@ -10,7 +14,24 @@ MARKET_DB_URL = os.getenv(
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
 CLICKHOUSE_PORT = os.getenv("CLICKHOUSE_PORT", "8123")
 
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
 market_engine = create_engine(MARKET_DB_URL, pool_pre_ping=True)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def ping():
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
 
 
 async def get_market_data(

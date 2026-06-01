@@ -195,7 +195,7 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                     # AI 추론
                     pred_map = {p["ticker"] : p for p in predictions}
                     signal = pred_map[ticker]["signal"]
-                    confidence = pred[ticker]["confidence"]
+                    confidence = pred_map[ticker]["confidence"]
 
                     if confidence < config.min_confidence:
                         print(f"  {ticker}: 확신도 부족 -> SKIP")
