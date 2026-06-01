@@ -7,7 +7,12 @@ import os
 
 from app.services_report import generate_report, save_report
 from app.db import SessionLocal
-from app.routes_trade import ai_signal_event
+from app.routes_trade import ai_signal_event,warmup_events
+
+from app.schemas import PredictionResult, RealtimePayload, OnceCallbackPayload, WarmupPayload
+
+from app.models import LiveCandle
+from app.db import SessionLocal
 
 router = APIRouter()
 
@@ -23,31 +28,6 @@ once_results: dict[str, dict] = {}
 
 SIGNAL_MAP = {"매수": "BUY", "관망": "HOLD", "매도": "SELL"}
 
-
-# ── 스키마 ──────────────────────────────────────────────────────────────────
-
-class PredictionResult(BaseModel):
-    ticker: str
-    trade_datetime: str
-    pred_label: int
-    pred_str: str
-    prob_buy: float
-    prob_hold: float
-    prob_sell: float
-    model_version: str
-    interpretability: Optional[dict] = None
-
-
-class RealtimePayload(BaseModel):
-    inference_at: str
-    results: list[PredictionResult]
-
-
-class OnceCallbackPayload(BaseModel):
-    job_id: str
-    user_id: str
-    inference_at: str
-    results: list[PredictionResult]
 
 
 # ── 헬퍼 ──────────────────────────────────────────────────────────────────
@@ -165,3 +145,34 @@ def receive_realtime(payload: RealtimePayload, x_api_key: str = Header(None)):
     ai_signal_event.set()
 
     return {"status": "ok", "received": len(payload.results)}
+
+
+@router.post("/warmup")
+def receive_warmup(
+    payload: WarmupPayload,
+    x_api_key: str = Header(None),
+):
+    verify_api_key(x_api_key)
+
+    db = SessionLocal()
+    try:
+        for c in payload.candles:
+            db.add(LiveCandle(
+                ticker=payload.ticker,
+                timeframe="5m",
+                open=c["open"],
+                high=c["high"],
+                low=c["low"],
+                close=c["close"],
+                volume=c["volume"],
+                trade_datetime=c["datetime"],
+            ))
+        db.commit()
+    finally:
+        db.close()
+
+    for user_id, event in warmup_events.items():
+        event.set()
+
+    print(f" {payload.ticker}: 워밍업 {len(payload.candles)}개 수신")
+    return {"status": "ok", "received": len(payload.candles)}

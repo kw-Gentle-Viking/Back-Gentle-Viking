@@ -23,6 +23,9 @@ def get_db():
     finally:
         db.close()
 
+def get_market_engine():
+    return create_engine(os.getenv("MARKET_DB_URL"))
+
 def ping():
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))

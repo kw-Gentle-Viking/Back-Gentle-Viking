@@ -87,7 +87,7 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
     # 바구니에 있는데 전략 미지정 종목은 기본 전략
     for t in tickers: 
         if t not in strategies:
-            strategies[t] = create_strategy(t,"rsi_revesal",None)
+            strategies[t] = create_strategy(t,"ultra_safe",None)
     portfolio = Portfolio()
     portfolio.cash = total_capital
     portfolio.equity = total_capital
@@ -115,12 +115,12 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
             print(f"[User {user_id}] 워밍업 타임아웃")
 
         # 1. 초기 데이터 로드 (과거 봉)
-        for ticker in tickers:
-            # TODO: market-db에서 최근 N개 봉 로드
-            # rows = db.query(PriceMin05).filter(...).order_by(asc).limit(50)
-            # for row in rows:
-            #     strategies[ticker].generate_orders(row, portfolio)  # 워밍업
-            print(f"{ticker}: 과거 데이터 워밍업 완료")
+        # for ticker in tickers:
+        #     # TODO: market-db에서 최근 N개 봉 로드
+        #     # rows = db.query(PriceMin05).filter(...).order_by(asc).limit(50)
+        #     # for row in rows:
+        #     #     strategies[ticker].generate_orders(row, portfolio)  # 워밍업
+        #     print(f"{ticker}: 과거 데이터 워밍업 완료")
 
         db = SessionLocal()
         try:
