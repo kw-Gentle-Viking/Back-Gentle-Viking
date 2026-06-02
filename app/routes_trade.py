@@ -23,6 +23,8 @@ import pandas as pd
 import os
 from app.kis_websocket import KISWebSocket
 
+from app.shared_state import ai_signal_event, warmup_events
+
 
 router = APIRouter()
 
@@ -30,9 +32,6 @@ router = APIRouter()
 active_tasks: dict[int, asyncio.Task] = {}
 ai_client = AIClient()
 
-ai_signal_event = asyncio.Event()
-
-warmup_events: dict[int, asyncio.Event] = {}
 
 
 import mojito

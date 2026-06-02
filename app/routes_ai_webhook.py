@@ -7,7 +7,7 @@ import os
 
 from app.services_report import generate_report, save_report
 from app.db import SessionLocal
-from app.routes_trade import ai_signal_event,warmup_events
+from app.shared_state import realtime_predictions, SIGNAL_MAP, ai_signal_event, warmup_events
 
 from app.schemas import PredictionResult, RealtimePayload, OnceCallbackPayload, WarmupPayload
 

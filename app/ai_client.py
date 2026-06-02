@@ -1,6 +1,6 @@
 # app/ai_client.py
 import random
-from app.routes_ai_webhook import realtime_predictions, SIGNAL_MAP
+from app.shared_state import realtime_predictions, SIGNAL_MAP
 
 
 class AIClient:
