@@ -1,0 +1,57 @@
+# docker-compose.gcp.yml
+version: '3.8'
+
+services:
+  app-db:
+    image: postgres:15
+    container_name: app-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespass
+      POSTGRES_DB: app_data
+    ports:
+      - "5432:5432"
+    volumes:
+      - app_data:/var/lib/postgresql/data
+
+  market-db:
+    image: postgres:15
+    container_name: market-db
+    environment:
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: traderpass
+      POSTGRES_DB: market_data
+    ports:
+      - "5433:5432"
+    volumes:
+      - market_data:/var/lib/postgresql/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+
+  backend:
+    build: .
+    container_name: backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - app-db
+      - market-db
+      - clickhouse
+    env_file:
+      - .env.gcp
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+volumes:
+  app_data:
+  market_data:
+  clickhouse_data:

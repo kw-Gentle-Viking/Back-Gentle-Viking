@@ -1,7 +1,7 @@
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, date
 from pydantic import constr
-from typing import Optional
+from typing import Optional, Literal
 
 from enum import IntEnum
 
@@ -188,7 +188,8 @@ class WarmupPayload(BaseModel):
 # market
 class OHLCVRecord(BaseModel):
     ticker: str
-    trade_datetime: str
+    trade_date: str | None = None # 일봉
+    trade_datetime: str | None = None #분봉
     open: float
     high: float
     low: float
@@ -197,7 +198,7 @@ class OHLCVRecord(BaseModel):
 
 
 class OHLCVPayload(BaseModel):
-    timeframe: str  # 1d | 5m | 1m
+    timeframe: Literal["1d", "5m", "1m"]  # 1d | 5m | 1m
     records: list[OHLCVRecord]
 
 
