@@ -1,5 +1,7 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.health import router as health_router
+from app.routes_kis import router as kis_router
 from app.db import Base, engine
 import app.models
 
@@ -35,6 +37,14 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(health_router, prefix="/health")
 app.include_router(users_router, prefix="/users", tags=["users"])
 app.include_router(prices_router, prefix="/prices", tags=["prices"])
@@ -49,6 +59,7 @@ app.include_router(trade_router, prefix="/trade", tags=["trade"])
 
 app.include_router(ai_webhook_router, prefix="/ai", tags=["ai-webhook"])
 app.include_router(ai_command_router, prefix="/ai", tags=["ai-command"])
+app.include_router(kis_router, tags=["kis"])
 
 
 @app.get("/")
