@@ -128,7 +128,7 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                     .filter(LiveCandle.ticker == ticker)\
                     .order_by(LiveCandle.trade_datetime.asc())\
                     .limit(get_warmup_count(
-                        next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "ultra_safe")
+                        next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "ultra_s")
                     )).all()
 
                 for candle in candles:
@@ -194,7 +194,7 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                     # AI 추론
                     pred_map = {p["ticker"] : p for p in predictions}
                     signal = pred_map[ticker]["signal"]
-                    confidence = pred[ticker]["confidence"]
+                    confidence = pred_map[ticker]["confidence"]
 
                     if confidence < config.min_confidence:
                         print(f"  {ticker}: 확신도 부족 -> SKIP")
@@ -285,7 +285,7 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                 db.commit()
             finally :
                 db.close()
-            await asyncio.sleep(300)  # 5분 대기
+            #await asyncio.sleep(300)  # 5분 대기
     except asyncio.CancelledError:
         await ws.disconnect()
         ws_task.cancel()
@@ -434,7 +434,6 @@ async def run_once(
         db.close()
 
     return results
-    
 
 
 # routes_trade.py에 추가
@@ -459,7 +458,7 @@ async def start_trading(
     else:
         # TODO: KIS API로 예수금 조회
         total_capital = get_balance()
-        total_capital = 10_000_000  # 더미
+        #total_capital = 10_000_000  # 더미
 
     if user_id in active_tasks and not active_tasks[user_id].done():
         return {"status": "ALREADY_RUNNING", "message": "이미 자동매매 실행 중"}
@@ -470,10 +469,25 @@ async def start_trading(
 
     tickers = [item.ticker for item in items]
 
+    warmup_requests = []
+    for ticker in tickers:
+        strategy_id = "ultra_safe"
+        for ts in payload.ticker_strategies:
+            if ts.ticker == ticker:
+                strategy_id = ts.strategy_id
+                break
+        warmup_requests.append({
+            "ticker": ticker,
+            "timeframe": get_timeframe(strategy_id),
+            "count": get_warmup_count(strategy_id),
+            "from_datetime": datetime.now().isoformat(),
+        })
+
     command_queue.append({
         "command": "START",
         "user_id": current_user.id,
         "tickers": tickers,
+        "warmup" : warmup_requests,
         "created_at": datetime.now().isoformat(),
         "status": "pending",
     })
@@ -506,15 +520,14 @@ async def stop_trading(current_user: User = Depends(get_current_user)):
     if user_id in active_tasks and not active_tasks[user_id].done():
         active_tasks[user_id].cancel()
         del active_tasks[user_id]
+        command_queue.append({
+            "command": "STOP",
+            "user_id": current_user.id,
+            "tickers": [],
+            "created_at": datetime.now().isoformat(),
+            "status": "pending",
+        })
         return {"status": "STOPPED", "message": "자동매매 중단"}
-
-    command_queue.append({
-        "command": "STOP",
-        "user_id": current_user.id,
-        "tickers": [],
-        "created_at": datetime.now().isoformat(),
-        "status": "pending",
-    })
 
     return {"status": "NOT_RUNNING", "message": "실행 중인 자동매매 없음"}
 
