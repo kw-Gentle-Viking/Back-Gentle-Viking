@@ -23,6 +23,8 @@ import pandas as pd
 import os
 from app.kis_websocket import KISWebSocket
 
+from app.shared_state import ai_signal_event, warmup_events
+
 
 router = APIRouter()
 
@@ -30,9 +32,6 @@ router = APIRouter()
 active_tasks: dict[int, asyncio.Task] = {}
 ai_client = AIClient()
 
-ai_signal_event = asyncio.Event()
-
-warmup_events: dict[int, asyncio.Event] = {}
 
 
 import mojito
@@ -87,7 +86,7 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
     # 바구니에 있는데 전략 미지정 종목은 기본 전략
     for t in tickers: 
         if t not in strategies:
-            strategies[t] = create_strategy(t,"rsi_revesal",None)
+            strategies[t] = create_strategy(t,"ultra_safe",None)
     portfolio = Portfolio()
     portfolio.cash = total_capital
     portfolio.equity = total_capital
@@ -115,12 +114,12 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
             print(f"[User {user_id}] 워밍업 타임아웃")
 
         # 1. 초기 데이터 로드 (과거 봉)
-        for ticker in tickers:
-            # TODO: market-db에서 최근 N개 봉 로드
-            # rows = db.query(PriceMin05).filter(...).order_by(asc).limit(50)
-            # for row in rows:
-            #     strategies[ticker].generate_orders(row, portfolio)  # 워밍업
-            print(f"{ticker}: 과거 데이터 워밍업 완료")
+        # for ticker in tickers:
+        #     # TODO: market-db에서 최근 N개 봉 로드
+        #     # rows = db.query(PriceMin05).filter(...).order_by(asc).limit(50)
+        #     # for row in rows:
+        #     #     strategies[ticker].generate_orders(row, portfolio)  # 워밍업
+        #     print(f"{ticker}: 과거 데이터 워밍업 완료")
 
         db = SessionLocal()
         try:
@@ -129,7 +128,7 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                     .filter(LiveCandle.ticker == ticker)\
                     .order_by(LiveCandle.trade_datetime.asc())\
                     .limit(get_warmup_count(
-                        next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "rsi_reversal")
+                        next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "ultra_s")
                     )).all()
 
                 for candle in candles:
@@ -286,7 +285,7 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                 db.commit()
             finally :
                 db.close()
-            await asyncio.sleep(300)  # 5분 대기
+            #await asyncio.sleep(300)  # 5분 대기
     except asyncio.CancelledError:
         await ws.disconnect()
         ws_task.cancel()
@@ -304,60 +303,122 @@ async def run_once(
     ticker_strategies: list[TickerStrategy],
 ):
     """1회 실행"""
-    from app.db import SessionLocal
-
     strategies = {}
     for ts in ticker_strategies:
         strategies[ts.ticker] = create_strategy(ts.ticker, ts.strategy_id, ts.params)
     for t in tickers:
         if t not in strategies:
-            strategies[t] = create_strategy(t, "rsi_reversal", None)
+            strategies[t] = create_strategy(t, "ultra_safe", None)
 
     portfolio = Portfolio()
     portfolio.cash = total_capital
     portfolio.equity = total_capital
 
+    # AI 추론
+    predictions = []
+    for ticker in tickers:
+        pred = ai_client.predict(ticker)
+        predictions.append(pred)
+
+    # 포트폴리오 분배
+    allocation = allocate_portfolio(
+        predictions=predictions,
+        persona_id=persona_id,
+        total_capital=total_capital,
+        max_weight=config.max_weight,
+        cash_reserve=config.cash_reserve,
+        min_confidence=config.min_confidence,
+        use_persona_boost=config.use_persona_boost,
+    )
+    allocation_map = {a["ticker"]: a for a in allocation}
+
+    pred_map = {p["ticker"]: p for p in predictions}
+
     db = SessionLocal()
     results = []
     try:
         for ticker in tickers:
-            close = 50000  # TODO: KIS API 실시간 시세
+            # 시세 조회
+            if broker:
+                try:
+                    resp = broker.fetch_price(ticker)
+                    if resp.get("rt_cd") == "0":
+                        close = int(resp["output"]["stck_prpr"])
+                    else:
+                        close = 50000
+                except:
+                    close = 50000
+            else:
+                close = 50000
 
             row = pd.Series(
                 {"close": close, "high": close, "low": close, "volume": 0},
                 name=pd.Timestamp.now(),
             )
 
-            pred = ai_client.predict(ticker)
-            signal = pred["signal"]
-            confidence = pred["confidence"]
+            signal = pred_map[ticker]["signal"]
+            confidence = pred_map[ticker]["confidence"]
 
             action = "SKIP"
-
 
             if confidence < config.min_confidence:
                 action = "SKIP"
             elif signal == "HOLD":
-                action = "HOLD"
-            else:
                 orders = strategies[ticker].generate_orders(row, portfolio)
-
                 for order in orders:
                     order_signal = "BUY" if order.side.value == "BUY" else "SELL"
-                    if order_signal == signal:
-                        action = signal
+
+                    if order_signal == "BUY" and ticker in allocation_map:
+                        qty = (allocation_map[ticker]["amount"] // close) // 2
+                    elif order_signal == "SELL":
+                        pos = portfolio.positions.get(ticker)
+                        qty = pos.qty // 2 if pos and pos.qty > 0 else 0
+                    else:
+                        continue
+
+                    if qty > 0:
+                        action = f"HOLD_{order_signal}"
                         db.add(TradeLog(
                             user_id=user_id,
                             ticker=ticker,
-                            side=signal,
-                            qty=int(order.qty),
+                            side=order_signal,
+                            qty=qty,
                             price=close,
-                            amount=int(order.qty * close),
+                            amount=int(qty * close),
                             ai_signal=signal,
                             ai_confidence=confidence,
                             strategy_id=strategies[ticker].__class__.__name__,
+                            status="FILLED",
                         ))
-                    else :
+            else:
+                orders = strategies[ticker].generate_orders(row, portfolio)
+                for order in orders:
+                    order_signal = "BUY" if order.side.value == "BUY" else "SELL"
+
+                    if signal == order_signal:
+                        if order_signal == "BUY" and ticker in allocation_map:
+                            qty = allocation_map[ticker]["amount"] // close
+                        elif order_signal == "SELL":
+                            pos = portfolio.positions.get(ticker)
+                            qty = pos.qty if pos and pos.qty > 0 else 0
+                        else:
+                            continue
+
+                        if qty > 0:
+                            action = signal
+                            db.add(TradeLog(
+                                user_id=user_id,
+                                ticker=ticker,
+                                side=order_signal,
+                                qty=qty,
+                                price=close,
+                                amount=int(qty * close),
+                                ai_signal=signal,
+                                ai_confidence=confidence,
+                                strategy_id=strategies[ticker].__class__.__name__,
+                                status="FILLED",
+                            ))
+                    else:
                         action = "HOLD"
 
             results.append({
@@ -365,6 +426,7 @@ async def run_once(
                 "signal": signal,
                 "confidence": confidence,
                 "action": action,
+                "price": close,
             })
 
         db.commit()
@@ -372,7 +434,6 @@ async def run_once(
         db.close()
 
     return results
-    
 
 
 # routes_trade.py에 추가
@@ -397,7 +458,7 @@ async def start_trading(
     else:
         # TODO: KIS API로 예수금 조회
         total_capital = get_balance()
-        total_capital = 10_000_000  # 더미
+        #total_capital = 10_000_000  # 더미
 
     if user_id in active_tasks and not active_tasks[user_id].done():
         return {"status": "ALREADY_RUNNING", "message": "이미 자동매매 실행 중"}
@@ -408,10 +469,25 @@ async def start_trading(
 
     tickers = [item.ticker for item in items]
 
+    warmup_requests = []
+    for ticker in tickers:
+        strategy_id = "ultra_safe"
+        for ts in payload.ticker_strategies:
+            if ts.ticker == ticker:
+                strategy_id = ts.strategy_id
+                break
+        warmup_requests.append({
+            "ticker": ticker,
+            "timeframe": get_timeframe(strategy_id),
+            "count": get_warmup_count(strategy_id),
+            "from_datetime": datetime.now().isoformat(),
+        })
+
     command_queue.append({
         "command": "START",
         "user_id": current_user.id,
         "tickers": tickers,
+        "warmup" : warmup_requests,
         "created_at": datetime.now().isoformat(),
         "status": "pending",
     })
@@ -444,15 +520,14 @@ async def stop_trading(current_user: User = Depends(get_current_user)):
     if user_id in active_tasks and not active_tasks[user_id].done():
         active_tasks[user_id].cancel()
         del active_tasks[user_id]
+        command_queue.append({
+            "command": "STOP",
+            "user_id": current_user.id,
+            "tickers": [],
+            "created_at": datetime.now().isoformat(),
+            "status": "pending",
+        })
         return {"status": "STOPPED", "message": "자동매매 중단"}
-
-    command_queue.append({
-        "command": "STOP",
-        "user_id": current_user.id,
-        "tickers": [],
-        "created_at": datetime.now().isoformat(),
-        "status": "pending",
-    })
 
     return {"status": "NOT_RUNNING", "message": "실행 중인 자동매매 없음"}
 

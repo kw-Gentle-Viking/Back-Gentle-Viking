@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.health import router as health_router
+from app.routes_kis import router as kis_router
 from app.db import Base, engine
 import app.models
 
@@ -18,9 +19,19 @@ from app.routes_ai_webhook import router as ai_webhook_router
 from app.routes_ai_command import router as ai_command_router
 from app.routes_market import router as market_router
 
+from contextlib import asynccontextmanager
+
+
 # Base.metadata.drop_all(bind=engine)
 
 Base.metadata.create_all(bind=engine)
+
+@asynccontextmanager
+async def lifespan(app):
+    from app.seed_rec import seed
+    seed()
+    yield
+
 
 app = FastAPI(
     title="Control Plane",
@@ -55,6 +66,7 @@ app.include_router(trade_router, prefix="/trade", tags=["trade"])
 app.include_router(ai_webhook_router, prefix="/ai", tags=["ai-webhook"])
 app.include_router(ai_command_router, prefix="/ai", tags=["ai-command"])
 app.include_router(market_router, prefix="/market", tags=["market"])
+app.include_router(kis_router, tags=["kis"])
 
 
 @app.get("/")

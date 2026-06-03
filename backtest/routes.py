@@ -83,9 +83,9 @@ async def list_strategies():
     """
     return {
         "strategies": [
-            {"name": "ma_cross", "description": "이동평균 크로스"},
-            {"name": "rsi_reversal", "description": "RSI 반전"},
-            {"name": "support_resistance", "description": "지지/저항"},
-            {"name": "momentum", "description": "모멘텀"},
+            {"name": "aggressive", "description": "고위험 고수익 5분봉 모멘텀 돌파 + 거래량 급증"},
+            {"name": "balanced", "description": "중위험 적당 수익15분봉 MACCD 추세 + 5분봉 RSI 진입"},
+            {"name": "conservative", "description": "안정형 15분봉 추세 + 5분봉 RSI 진입"},
+            {"name": "ultra_safe", "description": "매우 안정형 1시간봉 추세 + 15분봉 확인 + 5분봉 진입"},
         ]
     }

@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 from collections import defaultdict
 from datetime import datetime
+from app.schemas import CommandRequest
 
 router = APIRouter()
 
@@ -11,11 +12,6 @@ router = APIRouter()
 command_queue: list[dict] = []
 
 
-class CommandRequest(BaseModel):
-    command: str          # START | STOP | ONCE
-    user_id: int
-    tickers: list[str] = []
-    callback_url: Optional[str] = None
 
 
 @router.post("/commands/push")

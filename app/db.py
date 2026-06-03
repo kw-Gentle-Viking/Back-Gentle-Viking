@@ -29,6 +29,10 @@ def get_db():
         db.close()
 
 
+def get_market_engine():
+    return market_engine
+
+
 def ping():
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
@@ -126,7 +130,6 @@ async def get_from_clickhouse(
 
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
-        # 결과 조회
         query = f"""
             SELECT *
             FROM backtest_results
@@ -135,7 +138,6 @@ async def get_from_clickhouse(
             LIMIT {limit} OFFSET {offset}
             FORMAT JSON
         """
-        # 총 개수 조회
         count_query = f"""
             SELECT count() as total
             FROM backtest_results

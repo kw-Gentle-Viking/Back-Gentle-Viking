@@ -1,55 +1,19 @@
 # app/routes_ai_webhook.py
-from fastapi import APIRouter, HTTPException, Header
-from pydantic import BaseModel
-from typing import Optional
 import os
 
+from fastapi import APIRouter, Header, HTTPException
 
-from app.services_report import generate_report, save_report
 from app.db import SessionLocal
+from app.models import LiveCandle
+from app.schemas import OnceCallbackPayload, PredictionResult, RealtimePayload, WarmupPayload
+from app.services_report import generate_report, save_report
+from app.shared_state import SIGNAL_MAP, ai_signal_event, realtime_predictions, warmup_events
 
 router = APIRouter()
 
-# AI 서버 인증키
 AI_API_KEY = os.getenv("AI_SERVER_API_KEY", "dev-ai-key")
-
-# 유저별 최신 추론 결과 저장 (메모리)
-# ticker -> 최신 추론 결과
-realtime_predictions: dict[str, dict] = {}
-
-# ONCE 결과 저장 (job_id -> 결과)
 once_results: dict[str, dict] = {}
 
-SIGNAL_MAP = {"매수": "BUY", "관망": "HOLD", "매도": "SELL"}
-
-
-# ── 스키마 ──────────────────────────────────────────────────────────────────
-
-class PredictionResult(BaseModel):
-    ticker: str
-    trade_datetime: str
-    pred_label: int
-    pred_str: str
-    prob_buy: float
-    prob_hold: float
-    prob_sell: float
-    model_version: str
-    interpretability: Optional[dict] = None
-
-
-class RealtimePayload(BaseModel):
-    inference_at: str
-    results: list[PredictionResult]
-
-
-class OnceCallbackPayload(BaseModel):
-    job_id: str
-    user_id: str
-    inference_at: str
-    results: list[PredictionResult]
-
-
-# ── 헬퍼 ──────────────────────────────────────────────────────────────────
 
 def verify_api_key(x_api_key: str = Header(None)):
     if x_api_key != AI_API_KEY:
@@ -71,29 +35,25 @@ def parse_prediction(result: PredictionResult) -> dict:
     }
 
 
-# ── 엔드포인트 ──────────────────────────────────────────────────────────────
-
 @router.post("/realtime")
 def receive_realtime(
     payload: RealtimePayload,
     x_api_key: str = Header(None),
 ):
-    """5분 자동 추론 결과 수신 (AI 서버 → 백엔드)"""
+    """5분 자동 추론 결과 수신 (AI 서버 -> 백엔드)"""
     verify_api_key(x_api_key)
 
     for result in payload.results:
         parsed = parse_prediction(result)
         realtime_predictions[result.ticker] = parsed
-        print(f" {result.ticker}: {parsed['signal']} "
-              f"(B:{result.prob_buy:.3f} H:{result.prob_hold:.3f} S:{result.prob_sell:.3f})")
+        print(
+            f" {result.ticker}: {parsed['signal']} "
+            f"(B:{result.prob_buy:.3f} H:{result.prob_hold:.3f} S:{result.prob_sell:.3f})"
+        )
 
-    from app.routes_trade import ai_signal_event
     ai_signal_event.set()
 
-    return {
-        "status": "ok",
-        "received": len(payload.results),
-    }
+    return {"status": "ok", "received": len(payload.results)}
 
 
 @router.post("/callback")
@@ -101,7 +61,7 @@ def receive_once_callback(
     payload: OnceCallbackPayload,
     x_api_key: str = Header(None),
 ):
-    """ONCE 추론 결과 수신 (AI 서버 → 백엔드)"""
+    """ONCE 추론 결과 수신 (AI 서버 -> 백엔드)"""
     verify_api_key(x_api_key)
 
     parsed_results = []
@@ -115,11 +75,13 @@ def receive_once_callback(
         parsed["trade_datetime"] = result.trade_datetime
         parsed_results.append(parsed)
 
-    # 보고서 생성 + DB 저장
     db = SessionLocal()
     try:
         for result in parsed_results:
             report = generate_report(result)
+            result["analysis"] = report
+            result["report"] = report
+            realtime_predictions[result["ticker"]] = result
             save_report(db, user_id=int(payload.user_id), persona_id=1, report=report)
             print(f"  {result['ticker']} 보고서 생성 완료")
     finally:
@@ -131,11 +93,14 @@ def receive_once_callback(
         "results": parsed_results,
     }
 
+    ai_signal_event.set()
+
     return {
         "status": "ok",
         "job_id": payload.job_id,
         "received": len(parsed_results),
     }
+
 
 @router.get("/predictions/{ticker}")
 def get_prediction(ticker: str):
@@ -154,3 +119,35 @@ def get_once_result(job_id: str):
         raise HTTPException(status_code=404, detail="결과 없음")
     return result
 
+
+@router.post("/warmup")
+def receive_warmup(
+    payload: WarmupPayload,
+    x_api_key: str = Header(None),
+):
+    verify_api_key(x_api_key)
+
+    db = SessionLocal()
+    try:
+        for c in payload.candles:
+            db.add(
+                LiveCandle(
+                    ticker=payload.ticker,
+                    timeframe="5m",
+                    open=c["open"],
+                    high=c["high"],
+                    low=c["low"],
+                    close=c["close"],
+                    volume=c["volume"],
+                    trade_datetime=c["datetime"],
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    for event in warmup_events.values():
+        event.set()
+
+    print(f" {payload.ticker}: 워밍업 {len(payload.candles)}개 수신")
+    return {"status": "ok", "received": len(payload.candles)}
