@@ -194,3 +194,4 @@ MarketData/
 
 
 .env.gcp
+tests/
