@@ -128,7 +128,7 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                     .filter(LiveCandle.ticker == ticker)\
                     .order_by(LiveCandle.trade_datetime.asc())\
                     .limit(get_warmup_count(
-                        next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "rsi_reversal")
+                        next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "ultra_safe")
                     )).all()
 
                 for candle in candles:
@@ -303,60 +303,122 @@ async def run_once(
     ticker_strategies: list[TickerStrategy],
 ):
     """1회 실행"""
-    from app.db import SessionLocal
-
     strategies = {}
     for ts in ticker_strategies:
         strategies[ts.ticker] = create_strategy(ts.ticker, ts.strategy_id, ts.params)
     for t in tickers:
         if t not in strategies:
-            strategies[t] = create_strategy(t, "rsi_reversal", None)
+            strategies[t] = create_strategy(t, "ultra_safe", None)
 
     portfolio = Portfolio()
     portfolio.cash = total_capital
     portfolio.equity = total_capital
 
+    # AI 추론
+    predictions = []
+    for ticker in tickers:
+        pred = ai_client.predict(ticker)
+        predictions.append(pred)
+
+    # 포트폴리오 분배
+    allocation = allocate_portfolio(
+        predictions=predictions,
+        persona_id=persona_id,
+        total_capital=total_capital,
+        max_weight=config.max_weight,
+        cash_reserve=config.cash_reserve,
+        min_confidence=config.min_confidence,
+        use_persona_boost=config.use_persona_boost,
+    )
+    allocation_map = {a["ticker"]: a for a in allocation}
+
+    pred_map = {p["ticker"]: p for p in predictions}
+
     db = SessionLocal()
     results = []
     try:
         for ticker in tickers:
-            close = 50000  # TODO: KIS API 실시간 시세
+            # 시세 조회
+            if broker:
+                try:
+                    resp = broker.fetch_price(ticker)
+                    if resp.get("rt_cd") == "0":
+                        close = int(resp["output"]["stck_prpr"])
+                    else:
+                        close = 50000
+                except:
+                    close = 50000
+            else:
+                close = 50000
 
             row = pd.Series(
                 {"close": close, "high": close, "low": close, "volume": 0},
                 name=pd.Timestamp.now(),
             )
 
-            pred = ai_client.predict(ticker)
-            signal = pred["signal"]
-            confidence = pred["confidence"]
+            signal = pred_map[ticker]["signal"]
+            confidence = pred_map[ticker]["confidence"]
 
             action = "SKIP"
-
 
             if confidence < config.min_confidence:
                 action = "SKIP"
             elif signal == "HOLD":
-                action = "HOLD"
-            else:
                 orders = strategies[ticker].generate_orders(row, portfolio)
-
                 for order in orders:
                     order_signal = "BUY" if order.side.value == "BUY" else "SELL"
-                    if order_signal == signal:
-                        action = signal
+
+                    if order_signal == "BUY" and ticker in allocation_map:
+                        qty = (allocation_map[ticker]["amount"] // close) // 2
+                    elif order_signal == "SELL":
+                        pos = portfolio.positions.get(ticker)
+                        qty = pos.qty // 2 if pos and pos.qty > 0 else 0
+                    else:
+                        continue
+
+                    if qty > 0:
+                        action = f"HOLD_{order_signal}"
                         db.add(TradeLog(
                             user_id=user_id,
                             ticker=ticker,
-                            side=signal,
-                            qty=int(order.qty),
+                            side=order_signal,
+                            qty=qty,
                             price=close,
-                            amount=int(order.qty * close),
+                            amount=int(qty * close),
                             ai_signal=signal,
                             ai_confidence=confidence,
                             strategy_id=strategies[ticker].__class__.__name__,
+                            status="FILLED",
                         ))
-                    else :
+            else:
+                orders = strategies[ticker].generate_orders(row, portfolio)
+                for order in orders:
+                    order_signal = "BUY" if order.side.value == "BUY" else "SELL"
+
+                    if signal == order_signal:
+                        if order_signal == "BUY" and ticker in allocation_map:
+                            qty = allocation_map[ticker]["amount"] // close
+                        elif order_signal == "SELL":
+                            pos = portfolio.positions.get(ticker)
+                            qty = pos.qty if pos and pos.qty > 0 else 0
+                        else:
+                            continue
+
+                        if qty > 0:
+                            action = signal
+                            db.add(TradeLog(
+                                user_id=user_id,
+                                ticker=ticker,
+                                side=order_signal,
+                                qty=qty,
+                                price=close,
+                                amount=int(qty * close),
+                                ai_signal=signal,
+                                ai_confidence=confidence,
+                                strategy_id=strategies[ticker].__class__.__name__,
+                                status="FILLED",
+                            ))
+                    else:
                         action = "HOLD"
 
             results.append({
@@ -364,6 +426,7 @@ async def run_once(
                 "signal": signal,
                 "confidence": confidence,
                 "action": action,
+                "price": close,
             })
 
         db.commit()

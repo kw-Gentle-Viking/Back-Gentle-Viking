@@ -16,9 +16,19 @@ from app.routes_trade import router as trade_router
 from app.routes_ai_webhook import router as ai_webhook_router
 from app.routes_ai_command import router as ai_command_router
 
+from contextlib import asynccontextmanager
+
+
 # Base.metadata.drop_all(bind=engine)
 
 Base.metadata.create_all(bind=engine)
+
+@asynccontextmanager
+async def lifespan(app):
+    from app.seed_rec import seed
+    seed()
+    yield
+
 
 app = FastAPI(
     title="Control Plane",
@@ -44,3 +54,4 @@ app.include_router(ai_command_router, prefix="/ai", tags=["ai-command"])
 @app.get("/")
 def root():
     return {"status": "ok", "service": "control-plane"}
+
