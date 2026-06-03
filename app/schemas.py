@@ -1,7 +1,7 @@
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, date
 from pydantic import constr
-from typing import Optional
+from typing import Optional, Literal
 
 from enum import IntEnum
 
@@ -141,8 +141,64 @@ class TradeStartRequest(BaseModel):
     # rsi_reversal: {"period": 14, "oversold": 30, "overbought": 70}
     # ma_cross:     {"fast_period": 5, "slow_period": 20}
 
-
+# trade
 class TradeRequest(BaseModel):
     total_capital: int = 10_000_000
     strategy: Optional[list[TickerStrategy]] = None
     allocation: Optional[AllocationConfig] = None
+
+
+# command
+class CommandRequest(BaseModel):
+    command: str          # START | STOP | ONCE
+    user_id: int
+    tickers: list[str] = []
+    callback_url: Optional[str] = None
+
+
+# ai_webhook 
+class PredictionResult(BaseModel):
+    ticker: str
+    trade_datetime: str
+    pred_label: int
+    pred_str: str
+    prob_buy: float
+    prob_hold: float
+    prob_sell: float
+    model_version: str
+    interpretability: Optional[dict] = None
+
+
+class RealtimePayload(BaseModel):
+    inference_at: str
+    results: list[PredictionResult]
+
+
+class OnceCallbackPayload(BaseModel):
+    job_id: str
+    user_id: str
+    inference_at: str
+    results: list[PredictionResult]
+
+class WarmupPayload(BaseModel):
+    ticker: str
+    candles: list[dict]
+
+
+# market
+class OHLCVRecord(BaseModel):
+    ticker: str
+    trade_date: str | None = None # 일봉
+    trade_datetime: str | None = None #분봉
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+
+
+class OHLCVPayload(BaseModel):
+    timeframe: Literal["1d", "5m", "1m"]  # 1d | 5m | 1m
+    records: list[OHLCVRecord]
+
+
