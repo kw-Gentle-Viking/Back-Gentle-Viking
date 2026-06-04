@@ -21,7 +21,7 @@ def get_recommend(
     report = get_ai_recommendation(
         db=db,
         user_id=current_user.id,
-        persona_id=current_user.risk_score,
+        persona_id=current_user.risk_score or 3,
     )
     return {
         "report": report,

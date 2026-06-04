@@ -1,4 +1,5 @@
 # app/ai_client.py
+import os
 import random
 from app.shared_state import realtime_predictions, SIGNAL_MAP
 
@@ -17,6 +18,18 @@ class AIClient:
                 "ticker": pred["ticker"],
                 "signal": pred["signal"],
                 "confidence": pred["confidence"],
+            }
+
+        if os.getenv("AI_ALLOW_DUMMY_PREDICTIONS", "false").lower() not in {
+            "1",
+            "true",
+            "yes",
+            "y",
+        }:
+            return {
+                "ticker": ticker,
+                "signal": "HOLD",
+                "confidence": 0.0,
             }
 
         # 더미 (AI 서버 미연결 시)

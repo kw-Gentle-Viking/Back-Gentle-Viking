@@ -28,13 +28,15 @@ def create_user(db: Session, data: UserCreate, risk_score: int):
     return user
 
 
-def update_user_profile(db: Session, user, payload, risk_score: int):
-    user.investment_goal = payload.investment_goal
-    user.investment_period = payload.investment_period
-    user.risk_tolerance = payload.risk_tolerance
-    user.investment_experience = payload.investment_experience
-    user.volatility_preference = payload.volatility_preference
-    user.risk_score = risk_score
+def update_user_profile(db: Session, user, payload, risk_score: int | None):
+    for field in payload.model_fields_set:
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(user, field, value)
+
+    if risk_score is not None:
+        user.risk_score = risk_score
+
     db.commit()
     db.refresh(user)
     return user

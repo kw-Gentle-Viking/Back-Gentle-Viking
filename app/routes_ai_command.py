@@ -1,10 +1,13 @@
 # app/routes_ai_command.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 from collections import defaultdict
 from datetime import datetime
 from app.schemas import CommandRequest
+
+from app.dependencies import get_current_user
+from app.models import User
 
 router = APIRouter()
 
@@ -12,6 +15,41 @@ router = APIRouter()
 command_queue: list[dict] = []
 
 
+
+
+class PredictionRequest(BaseModel):
+    tickers: list[str]
+
+
+@router.post("/predictions/request")
+def request_prediction(
+    payload: PredictionRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """프론트가 AI 서버에 ONCE 추론을 요청하도록 커맨드 큐에 적재"""
+    tickers = [ticker for ticker in payload.tickers if ticker]
+    if not tickers:
+        raise HTTPException(status_code=400, detail="tickers required")
+
+    job_id = f"once-{current_user.id}-{int(datetime.now().timestamp())}"
+    base_url = str(request.base_url).rstrip("/")
+    cmd = {
+        "command": "ONCE",
+        "job_id": job_id,
+        "user_id": current_user.id,
+        "tickers": tickers,
+        "callback_url": f"{base_url}/ai/callback",
+        "created_at": datetime.now().isoformat(),
+        "status": "pending",
+    }
+    command_queue.append(cmd)
+    return {
+        "status": "queued",
+        "job_id": job_id,
+        "tickers": tickers,
+        "callback_url": cmd["callback_url"],
+    }
 
 
 @router.post("/commands/push")

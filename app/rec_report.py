@@ -1060,6 +1060,49 @@ def run_gemini(client, context, market_context, persona_conf, user_deposit=0):
 def get_ai_recommendation(db: Session, user_id: int, persona_id: int) -> str:
     # DB에서 전부 가져오기
     p_conf = get_persona_config(db, persona_id)
+
+    if os.getenv("LOCAL_DEMO_MODE") == "1":
+        demo_context = """
+[CANDIDATE]
+ticker: 005930
+name: 삼성전자
+current_price: 81200
+change_rate: 0.61
+volume: 18234000
+per: 18.4
+pbr: 1.32
+source_type: local_demo
+
+[CANDIDATE]
+ticker: 000660
+name: SK하이닉스
+current_price: 163000
+change_rate: -1.25
+volume: 9321000
+per: 21.8
+pbr: 1.71
+source_type: local_demo
+
+[CANDIDATE]
+ticker: 035420
+name: NAVER
+current_price: 186700
+change_rate: 2.10
+volume: 1245000
+per: 24.3
+pbr: 1.19
+source_type: local_demo
+"""
+        report = _build_fallback_report(
+            p_conf,
+            10_000_000,
+            "로컬 시연 모드: 외부 뉴스/공시/API 호출 없이 고정 후보로 리포트를 생성했습니다.",
+            demo_context,
+            error_message="LOCAL_DEMO_MODE",
+        )
+        save_report(db, user_id=user_id, persona_id=persona_id, report=report)
+        return report
+
     search_keywords = get_search_keywords(db)
     value_watchlist = get_value_watchlist(db)
     stop_words = get_stop_words(db)

@@ -6,13 +6,19 @@ def allocate_portfolio(
     total_capital: int,
     max_weight: float = 0.30,  # 한 종목 최대 30%
     cash_reserve: float = 0.10,  # 현금 보유 10%
+    min_confidence: float = 0.60,
+    use_persona_boost: bool = True,
 ) -> list[dict]:
     """
     predictions: [{"ticker": "005930", "signal": "BUY", "confidence": 0.85}, ...]
     """
 
     # 1. BUY 시그널만 필터
-    buys = [p for p in predictions if p["signal"] == "BUY" and p["confidence"] >= 0.6]
+    buys = [
+        p.copy()
+        for p in predictions
+        if p["signal"] == "BUY" and p["confidence"] >= min_confidence
+    ]
 
     if not buys:
         return []
@@ -30,7 +36,8 @@ def allocate_portfolio(
     for b in buys:
         # TODO: 실제로는 ticker로 대형주 여부 판단 (시가총액 기준)
         cap_type = b.get("cap_type", "default")
-        b["adj_confidence"] = b["confidence"] * multiplier.get(cap_type, 1.0)
+        persona_multiplier = multiplier.get(cap_type, 1.0) if use_persona_boost else 1.0
+        b["adj_confidence"] = b["confidence"] * persona_multiplier
 
     # 3. 가중 분배 (보정된 confidence 기준)
     total_conf = sum(b["adj_confidence"] for b in buys)

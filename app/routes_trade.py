@@ -1,6 +1,6 @@
 # app/routes_trade.py
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db,SessionLocal
@@ -22,6 +22,8 @@ from app.strategy_factory import create_strategy, get_warmup_count, get_timefram
 import pandas as pd
 import os
 from app.kis_websocket import KISWebSocket
+from app.kis_config import kis_is_mock, kis_real_trading_enabled
+from app.demo import demo_autotrade_loop_enabled, demo_mode_enabled
 
 from app.shared_state import ai_signal_event, warmup_events
 
@@ -30,6 +32,7 @@ router = APIRouter()
 
 # 유저별 자동매매 상태 저장 (메모리)
 active_tasks: dict[int, asyncio.Task] = {}
+active_demo_trades: set[int] = set()
 ai_client = AIClient()
 
 
@@ -43,7 +46,7 @@ def get_broker():
             api_key=os.getenv("KIS_APP_KEY"),
             api_secret=os.getenv("KIS_APP_SECRET"),
             acc_no=os.getenv("KIS_ACC_NO"),
-            mock=True,
+            mock=kis_is_mock(),
         )
     except Exception as e:
         print(f" KIS 연결 실패: {e}")
@@ -54,7 +57,7 @@ broker = get_broker()
 def get_balance() -> int:
     """KIS API 예수금 조회"""
     if not broker:
-        return 10_000_000  # KIS 미연결 시 기본값
+        return 10_000_000  # KIS 미연결 시 로컬 시연 기본값
 
     try:
         resp = broker.fetch_balance()
@@ -65,6 +68,17 @@ def get_balance() -> int:
     except Exception as e:
         print(f"잔고 조회 실패: {e}")
         return 10_000_000
+
+
+async def get_market_close(ticker: str) -> int:
+    from app.routes_kis import get_current_price
+
+    data = await get_current_price(ticker)
+    output = data.get("output") or {}
+    close = int(output.get("stck_prpr") or 0)
+    if close <= 0:
+        raise HTTPException(status_code=502, detail=f"{ticker} 현재가 조회 실패")
+    return close
 
 async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
     total_capital: int,
@@ -247,7 +261,11 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
 
                         for attempt in range(MAX_RETRY):
                             try : 
-                                #TODO: KIS API 주문
+                                if not broker:
+                                    raise Exception("KIS broker is not configured")
+                                if not kis_is_mock() and not kis_real_trading_enabled():
+                                    raise Exception("Set KIS_REAL_TRADING_ENABLED=true to allow real-account orders")
+
                                 resp = broker.create_order(
                                     symbol=ticker,
                                     side=order_signal,
@@ -270,10 +288,10 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                         db.add(TradeLog(
                                 user_id=user_id,
                                 ticker=ticker,
-                                side=signal,
-                                qty=int(order.qty),
+                                side=order_signal,
+                                qty=int(qty),
                                 price=close,
-                                amount=int(order.qty * close),
+                                amount=int(qty * close),
                                 ai_signal=signal,
                                 ai_confidence=confidence,
                                 strategy_id=strategies[ticker].__class__.__name__,
@@ -338,18 +356,7 @@ async def run_once(
     results = []
     try:
         for ticker in tickers:
-            # 시세 조회
-            if broker:
-                try:
-                    resp = broker.fetch_price(ticker)
-                    if resp.get("rt_cd") == "0":
-                        close = int(resp["output"]["stck_prpr"])
-                    else:
-                        close = 50000
-                except:
-                    close = 50000
-            else:
-                close = 50000
+            close = await get_market_close(ticker)
 
             row = pd.Series(
                 {"close": close, "high": close, "low": close, "volume": 0},
@@ -458,7 +465,6 @@ async def start_trading(
     else:
         # TODO: KIS API로 예수금 조회
         total_capital = get_balance()
-        #total_capital = 10_000_000  # 더미
 
     if user_id in active_tasks and not active_tasks[user_id].done():
         return {"status": "ALREADY_RUNNING", "message": "이미 자동매매 실행 중"}
@@ -494,11 +500,19 @@ async def start_trading(
 
 
 
+    if demo_mode_enabled() and not demo_autotrade_loop_enabled():
+        active_demo_trades.add(user_id)
+        return {
+            "status": "RUNNING",
+            "tickers": tickers,
+            "message": "데모 자동매매 시작: AI 서버에 START 커맨드를 전달했습니다.",
+        }
+
     task = asyncio.create_task(
         trading_loop(
             user_id=user_id,
             tickers=tickers,
-            persona_id=current_user.risk_score,
+            persona_id=current_user.risk_score or 3,
             total_capital=total_capital,
             config=payload.allocation,
             ticker_strategies=payload.ticker_strategies,
@@ -518,8 +532,6 @@ async def stop_trading(current_user: User = Depends(get_current_user)):
     user_id = current_user.id
 
     if user_id in active_tasks and not active_tasks[user_id].done():
-        active_tasks[user_id].cancel()
-        del active_tasks[user_id]
         command_queue.append({
             "command": "STOP",
             "user_id": current_user.id,
@@ -527,13 +539,36 @@ async def stop_trading(current_user: User = Depends(get_current_user)):
             "created_at": datetime.now().isoformat(),
             "status": "pending",
         })
+        active_tasks[user_id].cancel()
+        del active_tasks[user_id]
+        active_demo_trades.discard(user_id)
         return {"status": "STOPPED", "message": "자동매매 중단"}
+
+    if user_id in active_demo_trades:
+        active_demo_trades.discard(user_id)
+        command_queue.append({
+            "command": "STOP",
+            "user_id": current_user.id,
+            "tickers": [],
+            "created_at": datetime.now().isoformat(),
+            "status": "pending",
+        })
+        return {"status": "STOPPED", "message": "데모 자동매매 중단: AI 서버에 STOP 커맨드를 전달했습니다."}
+
+    command_queue.append({
+        "command": "STOP",
+        "user_id": current_user.id,
+        "tickers": [],
+        "created_at": datetime.now().isoformat(),
+        "status": "pending",
+    })
 
     return {"status": "NOT_RUNNING", "message": "실행 중인 자동매매 없음"}
 
 @router.post("/once")
 async def execute_once(
     payload: TradeRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -542,27 +577,36 @@ async def execute_once(
         raise HTTPException(status_code=400, detail="바구니가 비어있습니다")
 
     tickers = [item.ticker for item in items]
+    job_id = f"trade-once-{current_user.id}-{int(datetime.now().timestamp())}"
+    base_url = str(request.base_url).rstrip("/")
 
-    results = await run_once(
-        user_id=current_user.id,
-        tickers=tickers,
-        persona_id=current_user.risk_score,
-        total_capital=payload.total_capital,
-        config=payload.allocation,
-        ticker_strategies=payload.ticker_strategies,
-    )
+    command_queue.append({
+        "command": "ONCE",
+        "job_id": job_id,
+        "user_id": current_user.id,
+        "tickers": tickers,
+        "callback_url": f"{base_url}/ai/callback",
+        "created_at": datetime.now().isoformat(),
+        "status": "pending",
+        "trade_request": payload.dict(),
+    })
 
     return {
-        "status": "ONCE",
-        "results": results,
-        "message": "1회 실행 완료",
+        "status": "QUEUED",
+        "job_id": job_id,
+        "tickers": tickers,
+        "callback_url": f"{base_url}/ai/callback",
+        "message": "AI 서버에 1회 분석/실행 커맨드를 전달했습니다. AI 서버가 결과를 콜백하면 리포트와 자동매매 판단에 반영됩니다.",
     }
 
 
 @router.get("/status")
 async def get_status(current_user: User = Depends(get_current_user)):
     user_id = current_user.id
-    is_running = user_id in active_tasks and not active_tasks[user_id].done()
+    is_running = (
+        user_id in active_demo_trades
+        or (user_id in active_tasks and not active_tasks[user_id].done())
+    )
     return {"status": "RUNNING" if is_running else "STOPPED"}
 
 @router.get("/history")

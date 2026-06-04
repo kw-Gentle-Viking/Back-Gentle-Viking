@@ -59,7 +59,21 @@ services:
       - "5434:5432"
     volumes:
       - train_data:/var/lib/postgresql/data
-    restart: unless-stoppedd
+    restart: unless-stopped
+
+  # 3-1. AI 서버 전용 DB (stock_db.dump 복원 대상)
+  ai-stock-db:
+    image: postgres:16
+    container_name: ai-stock-db
+    environment:
+      POSTGRES_DB: stock_db
+      POSTGRES_USER: stock_user
+      POSTGRES_PASSWORD: stockpass
+    ports:
+      - "5435:5432"
+    volumes:
+      - ai_stock_data:/var/lib/postgresql/data
+    restart: unless-stopped
 
   # 4. 피처 캐시 (실시간)
   redis:
@@ -100,6 +114,7 @@ volumes:
   app_data:
   market_data:
   train_data:
+  ai_stock_data:
   redis_data:
   clickhouse_data:
   mlflow_data:

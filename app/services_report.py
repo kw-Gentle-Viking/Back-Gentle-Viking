@@ -189,3 +189,136 @@ def save_report(db, user_id: int, persona_id: int, report: str):
         report=report,
     ))
     db.commit()
+
+
+def _normalize_direction(value: str) -> str:
+    text = (value or "").upper()
+    if "BUY" in text or "매수" in value or "비중확대" in value:
+        return "BUY"
+    if "SELL" in text or "매도" in value or "제외" in value:
+        return "SELL"
+    if "HOLD" in text or "관망" in value or "보류" in value:
+        return "HOLD"
+    return "HOLD"
+
+
+def _signal_label(signal: str) -> str:
+    return {"BUY": "매수", "HOLD": "관망", "SELL": "매도"}.get(signal, "관망")
+
+
+def _agreement_label(recommendation_signal: str, tft_signal: str) -> tuple[str, str]:
+    rec = _normalize_direction(recommendation_signal)
+    tft = _normalize_direction(tft_signal)
+    if rec == tft:
+        return "의견 일치", "aligned"
+    if "HOLD" in {rec, tft}:
+        return "부분 불일치", "partial"
+    return "의견 불일치", "diverged"
+
+
+def _fallback_agreement_analysis(payload: dict) -> dict:
+    rec = _normalize_direction(payload.get("recommendation_signal", ""))
+    tft = _normalize_direction(payload.get("tft_signal", ""))
+    label, level = _agreement_label(rec, tft)
+    rec_label = _signal_label(rec)
+    tft_label = _signal_label(tft)
+
+    if level == "aligned":
+        interpretation = (
+            f"추천 리포트와 TFT 모델이 모두 {rec_label} 쪽으로 기울어져 있습니다. "
+            "중장기 추천 근거와 단기 시계열 흐름이 같은 방향을 가리키는 상태입니다."
+        )
+        action_note = "추천 근거와 단기 확률이 함께 우호적이므로, 리스크 한도 안에서 계획된 비중으로 접근할 수 있습니다."
+    elif level == "partial":
+        interpretation = (
+            f"추천 리포트는 {rec_label}, TFT 모델은 {tft_label}로 해석됩니다. "
+            "한쪽 모델이 관망을 제시해 방향성은 완전히 충돌하지 않지만, 진입 시점에는 추가 확인이 필요합니다."
+        )
+        action_note = "즉시 강한 진입보다는 분할 접근 또는 다음 예측 갱신을 확인하는 전략이 적합합니다."
+    else:
+        interpretation = (
+            f"추천 리포트는 {rec_label} 관점이지만 TFT 모델은 {tft_label} 우위입니다. "
+            "추천 리포트는 뉴스·공시·재료·수급 등 종목 매력도를, TFT는 최근 가격과 거래량의 단기 패턴을 더 강하게 반영하기 때문에 불일치가 발생할 수 있습니다."
+        )
+        action_note = "중장기 관심 후보로는 유지하되, 단기 진입은 보류하고 가격 안정 또는 TFT 신호 개선을 확인하는 편이 보수적입니다."
+
+    return {
+        "status": "fallback",
+        "recommendation_signal": rec_label,
+        "tft_signal": tft_label,
+        "alignment_label": label,
+        "alignment_level": level,
+        "summary": f"추천 리포트: {rec_label} / TFT 모델: {tft_label}",
+        "interpretation": interpretation,
+        "action_note": action_note,
+    }
+
+
+def generate_agreement_analysis(payload: dict) -> dict:
+    """추천 리포트와 TFT 예측 결과의 합치성 해석을 Gemini로 생성."""
+    rec = _normalize_direction(payload.get("recommendation_signal", ""))
+    tft = _normalize_direction(payload.get("tft_signal", ""))
+    label, level = _agreement_label(rec, tft)
+    fallback = _fallback_agreement_analysis(payload)
+
+    prompt = f"""
+다음은 한국 주식 {payload.get('name') or payload.get('ticker')}에 대한 두 AI 판단입니다.
+
+[추천 리포트 판단]
+- 방향: {_signal_label(rec)}
+- 원문 신호: {payload.get('recommendation_signal', '')}
+- 요약: {payload.get('recommendation_summary') or '제공 없음'}
+- 추천 근거: {payload.get('recommendation_reasons') or '제공 없음'}
+
+[TFT 시계열 모델 판단]
+- 방향: {_signal_label(tft)}
+- 확신도: {payload.get('confidence', 0)}%
+- 매수 확률: {payload.get('prob_buy', 0)}%
+- 관망 확률: {payload.get('prob_hold', 0)}%
+- 매도 확률: {payload.get('prob_sell', 0)}%
+
+[판단 상태]
+- 합치성: {label}
+
+두 모델의 관점 차이를 투자자가 이해할 수 있게 설명하세요.
+추천 리포트는 뉴스·공시·재료·수급·투자성향 기반의 종목 매력도이고,
+TFT는 최근 가격·거래량·시계열 패턴 기반의 단기 방향성이라는 점을 반영하세요.
+
+반드시 아래 JSON만 출력하세요.
+{{
+  "summary": "한 문장 요약",
+  "interpretation": "불일치 또는 일치가 발생한 이유를 2~3문장으로 설명",
+  "action_note": "투자자가 참고할 대응 관점을 1~2문장으로 설명"
+}}
+"""
+
+    try:
+        import json
+
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        try:
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config={"response_mime_type": "application/json"},
+            )
+        except TypeError:
+            resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+
+        text = (resp.text or "").strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            text = text.removeprefix("json").strip()
+        parsed = json.loads(text)
+        return {
+            **fallback,
+            "status": "ok",
+            "summary": parsed.get("summary") or fallback["summary"],
+            "interpretation": parsed.get("interpretation") or fallback["interpretation"],
+            "action_note": parsed.get("action_note") or fallback["action_note"],
+        }
+    except Exception:
+        result = dict(fallback)
+        result["status"] = "fallback"
+        return result
+

@@ -58,11 +58,11 @@ class UserCreate(BaseModel):
 class UserProfileUpdate(BaseModel):
     nickname: Optional[str] = None
     phone: Optional[str] = None
-    investment_goal: InvestmentGoal
-    investment_period: InvestmentPeriod
-    risk_tolerance: RiskTolerance
-    investment_experience: InvestmentExperience
-    volatility_preference: VolatilityPreference
+    investment_goal: Optional[InvestmentGoal] = None
+    investment_period: Optional[InvestmentPeriod] = None
+    risk_tolerance: Optional[RiskTolerance] = None
+    investment_experience: Optional[InvestmentExperience] = None
+    volatility_preference: Optional[VolatilityPreference] = None
 
 
 class UserRead(BaseModel):
@@ -114,6 +114,7 @@ class MarketPriceRead(MarketPriceCreate):
 
 class RecommendationResponse(BaseModel):
     report: str
+    timestamp: Optional[str] = None
 
 # Portfolio AI confidence + 페르소나 기반 구현
 class AllocationConfig(BaseModel):
@@ -179,6 +180,30 @@ class OnceCallbackPayload(BaseModel):
     user_id: str
     inference_at: str
     results: list[PredictionResult]
+
+class AgreementAnalysisRequest(BaseModel):
+    ticker: str
+    name: Optional[str] = None
+    recommendation_signal: str
+    recommendation_summary: Optional[str] = None
+    recommendation_reasons: Optional[str] = None
+    tft_signal: str
+    confidence: float
+    prob_buy: float
+    prob_hold: float
+    prob_sell: float
+
+
+class AgreementAnalysisResponse(BaseModel):
+    status: str
+    recommendation_signal: str
+    tft_signal: str
+    alignment_label: str
+    alignment_level: str
+    summary: str
+    interpretation: str
+    action_note: str
+
 
 class WarmupPayload(BaseModel):
     ticker: str

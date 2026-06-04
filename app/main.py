@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.health import router as health_router
@@ -18,6 +20,9 @@ from app.routes_trade import router as trade_router
 from app.routes_ai_webhook import router as ai_webhook_router
 from app.routes_ai_command import router as ai_command_router
 from app.routes_market import router as market_router
+from app.routes_kis import router as kis_router
+from app.demo import demo_mode_enabled, ensure_demo_user
+from app.db import SessionLocal
 
 from contextlib import asynccontextmanager
 
@@ -38,14 +43,22 @@ app = FastAPI(
     version="0.1.0",
 )
 
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
+
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", ",".join(DEFAULT_CORS_ORIGINS)).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,3 +85,14 @@ app.include_router(kis_router, tags=["kis"])
 @app.get("/")
 def root():
     return {"status": "ok", "service": "control-plane"}
+
+
+@app.on_event("startup")
+def setup_local_demo_data():
+    if not demo_mode_enabled():
+        return
+    db = SessionLocal()
+    try:
+        ensure_demo_user(db)
+    finally:
+        db.close()

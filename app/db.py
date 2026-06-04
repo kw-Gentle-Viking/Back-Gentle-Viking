@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=".env")
 from typing import Optional, Tuple, List, Dict, Any
 import pandas as pd
 from sqlalchemy import create_engine, text

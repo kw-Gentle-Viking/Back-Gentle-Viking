@@ -6,18 +6,17 @@ import requests
 from typing import Callable
 from collections import defaultdict
 
+from app.kis_config import kis_approval_url, kis_ws_url
+
 
 class KISWebSocket:
     """KIS 실시간 시세 웹소켓"""
 
-    WS_URL = "ws://ops.koreainvestment.com:21000"  # 모의투자
-    # WS_URL = "ws://ops.koreainvestment.com:31000"  # 실전투자
-    APPROVAL_URL = "https://openapivts.koreainvestment.com:29443/oauth2/Approval"
-    # 실전: https://openapi.koreainvestment.com:9443/oauth2/Approval
-
     def __init__(self, app_key: str, app_secret: str):
         self.app_key = app_key
         self.app_secret = app_secret
+        self.ws_url = kis_ws_url()
+        self.approval_url = kis_approval_url()
         self.approval_key = None
         self.ws = None
         self.prices: dict[str, dict] = {}  # ticker -> {price, volume, ...}
@@ -31,7 +30,8 @@ class KISWebSocket:
             "appkey": self.app_key,
             "secretkey": self.app_secret,
         }
-        resp = requests.post(self.APPROVAL_URL, json=body)
+        resp = requests.post(self.approval_url, json=body)
+        resp.raise_for_status()
         return resp.json()["approval_key"]
 
     def _build_subscribe_msg(self, ticker: str) -> str:
@@ -83,7 +83,7 @@ class KISWebSocket:
 
         self._running = True
 
-        async with websockets.connect(self.WS_URL, ping_interval=30) as ws:
+        async with websockets.connect(self.ws_url, ping_interval=30) as ws:
             self.ws = ws
             print(f"웹소켓 연결 완료")
 

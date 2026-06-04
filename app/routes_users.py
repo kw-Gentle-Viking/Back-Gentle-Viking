@@ -44,23 +44,23 @@ def update_profile(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    investment_fields = [
-        payload.investment_goal,
-        payload.investment_period,
-        payload.risk_tolerance,
-        payload.investment_experience,
-        payload.volatility_preference,
+    investment_field_names = [
+        "investment_goal",
+        "investment_period",
+        "risk_tolerance",
+        "investment_experience",
+        "volatility_preference",
     ]
-    risk_score = None 
+    risk_score = None
 
-    if any(f is not None for f in investment_fields):
-        risk_score = calculate_risk_score(
-            investment_goal=payload.investment_goal or current_user.investment_goal,
-            investment_period=payload.investment_period or current_user.investment_period,
-            risk_tolerance=payload.risk_tolerance or current_user.risk_tolerance,
-            investment_experience=payload.investment_experience or current_user.investment_experience,
-            volatility_preference=payload.volatility_preference or current_user.volatility_preference,
-        )
+    if any(name in payload.model_fields_set for name in investment_field_names):
+        values = {
+            name: getattr(payload, name) if getattr(payload, name) is not None else getattr(current_user, name)
+            for name in investment_field_names
+        }
+        if any(value is None for value in values.values()):
+            raise HTTPException(status_code=422, detail="투자성향 항목을 모두 입력해주세요")
+        risk_score = calculate_risk_score(**values)
 
     return update_user_profile(db, current_user, payload, risk_score)
 
