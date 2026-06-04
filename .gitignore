@@ -191,7 +191,6 @@ local_ai_artifacts/
 *.db
 .env.*
 !.env.example
-!.env.gcp.example
 !requirements.txt
 
 
