@@ -351,6 +351,7 @@ async def get_intraday(code: str):
     reference_time = current_hms if "090000" <= current_hms <= "153000" else "153000"
 
     all_items: list = []
+    seen_times: set[str] = set()
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for _ in range(13):
@@ -373,13 +374,19 @@ async def get_intraday(code: str):
                 break
 
             items = data["output2"]
-            all_items.extend(items)
+            for item in items:
+                candle_time = item.get("stck_cntg_hour", "")
+                if not candle_time or candle_time in seen_times:
+                    continue
+                seen_times.add(candle_time)
+                all_items.append(item)
 
             last_time = items[-1].get("stck_cntg_hour", "")
             if not last_time or last_time <= "090000":
                 break
 
-            reference_time = last_time
+            reference_dt = datetime.strptime(last_time, "%H%M%S") - timedelta(seconds=1)
+            reference_time = reference_dt.strftime("%H%M%S")
 
     return {"rt_cd": "0", "msg1": "", "output2": all_items}
 
