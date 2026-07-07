@@ -1,7 +1,7 @@
 # app/ai_client.py
 import os
 import random
-from app.shared_state import realtime_predictions, SIGNAL_MAP
+from app.shared_state import realtime_predictions
 
 
 class AIClient:
@@ -18,6 +18,11 @@ class AIClient:
                 "ticker": pred["ticker"],
                 "signal": pred["signal"],
                 "confidence": pred["confidence"],
+                "prob_buy": pred.get("prob_buy", 0.0),
+                "prob_hold": pred.get("prob_hold", 0.0),
+                "prob_sell": pred.get("prob_sell", 0.0),
+                "trade_datetime": pred.get("trade_datetime"),
+                "model_version": pred.get("model_version"),
             }
 
         if os.getenv("AI_ALLOW_DUMMY_PREDICTIONS", "false").lower() not in {
@@ -30,6 +35,9 @@ class AIClient:
                 "ticker": ticker,
                 "signal": "HOLD",
                 "confidence": 0.0,
+                "prob_buy": 0.0,
+                "prob_hold": 1.0,
+                "prob_sell": 0.0,
             }
 
         # 더미 (AI 서버 미연결 시)
@@ -39,4 +47,7 @@ class AIClient:
             "ticker": ticker,
             "signal": signal,
             "confidence": confidence,
+            "prob_buy": confidence if signal == "BUY" else 0.0,
+            "prob_hold": confidence if signal == "HOLD" else 0.0,
+            "prob_sell": confidence if signal == "SELL" else 0.0,
         }

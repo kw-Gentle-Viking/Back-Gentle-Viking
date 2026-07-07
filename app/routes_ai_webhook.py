@@ -7,7 +7,7 @@ from app.db import SessionLocal
 from app.models import LiveCandle
 from app.schemas import AgreementAnalysisRequest, OnceCallbackPayload, PredictionResult, RealtimePayload, WarmupPayload
 from app.services_report import generate_agreement_analysis, generate_report, save_report
-from app.shared_state import SIGNAL_MAP, ai_signal_event, realtime_predictions, warmup_events
+from app.shared_state import SIGNAL_MAP, ai_signal_event, realtime_predictions, warmup_events, warmup_received, warmup_requirements
 
 router = APIRouter()
 
@@ -72,7 +72,8 @@ def build_demo_prediction(ticker: str) -> dict:
     }
 
 def parse_prediction(result: PredictionResult) -> dict:
-    signal = SIGNAL_MAP.get(result.pred_str, "HOLD")
+    signal = SIGNAL_MAP.get(str(result.pred_str).strip(), "HOLD")
+    signal = SIGNAL_MAP.get(str(result.pred_label), signal)
     confidence = max(result.prob_buy, result.prob_hold, result.prob_sell)
     return {
         "ticker": result.ticker,
@@ -230,8 +231,20 @@ def receive_warmup(
     finally:
         db.close()
 
-    for event in warmup_events.values():
-        event.set()
+    received_count = len(payload.candles)
+    for user_id, requirements in list(warmup_requirements.items()):
+        required_count = requirements.get(payload.ticker)
+        if required_count is None:
+            continue
 
-    print(f" {payload.ticker}: 워밍업 {len(payload.candles)}개 수신")
-    return {"status": "ok", "received": len(payload.candles)}
+        warmup_received.setdefault(user_id, {})[payload.ticker] = received_count
+        if all(
+            warmup_received.get(user_id, {}).get(ticker, 0) >= count
+            for ticker, count in requirements.items()
+        ):
+            event = warmup_events.get(user_id)
+            if event:
+                event.set()
+
+    print(f" {payload.ticker}: 워밍업 {received_count}개 수신")
+    return {"status": "ok", "received": received_count}

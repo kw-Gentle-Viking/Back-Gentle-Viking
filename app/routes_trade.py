@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db,SessionLocal
 from app.dependencies import get_current_user
-from app.models import User,TradeLog,Basket,LiveCandle
+from app.models import User,TradeLog,Basket,LiveCandle,ManualTradeLock,AutoTradeDecision
 from app.ai_client import AIClient
 from app.services_allocation import allocate_portfolio
 from app.routes_ai_command import command_queue
@@ -25,7 +25,7 @@ from app.kis_websocket import KISWebSocket
 from app.kis_config import kis_is_mock, kis_real_trading_enabled
 from app.demo import demo_autotrade_loop_enabled, demo_mode_enabled
 
-from app.shared_state import ai_signal_event, warmup_events
+from app.shared_state import ai_signal_event, warmup_events, warmup_received, warmup_requirements
 
 
 router = APIRouter()
@@ -68,6 +68,79 @@ def get_balance() -> int:
     except Exception as e:
         print(f"잔고 조회 실패: {e}")
         return 10_000_000
+
+
+def get_auto_trade_basket_items(db: Session, user_id: int) -> tuple[list[Basket], list[str]]:
+    items = db.query(Basket).filter(Basket.user_id == user_id).all()
+    manual_tickers = {
+        lock.ticker
+        for lock in db.query(ManualTradeLock).filter(ManualTradeLock.user_id == user_id).all()
+    }
+    auto_items = [item for item in items if item.ticker not in manual_tickers]
+    excluded = [item.ticker for item in items if item.ticker in manual_tickers]
+    return auto_items, excluded
+
+
+def sync_request_basket(db: Session, user_id: int, payload) -> None:
+    if payload.basket is None and payload.tickers is None:
+        return
+
+    requested: dict[str, str] = {}
+    if payload.basket is not None:
+        for item in payload.basket:
+            ticker = item.ticker.strip()
+            if ticker:
+                requested[ticker] = item.ticker_name.strip() or ticker
+    else:
+        for ticker in payload.tickers or []:
+            code = ticker.strip()
+            if code:
+                requested[code] = code
+
+    existing = {
+        item.ticker: item
+        for item in db.query(Basket).filter(Basket.user_id == user_id).all()
+    }
+
+    for ticker, item in existing.items():
+        if ticker not in requested:
+            db.delete(item)
+
+    for ticker, ticker_name in requested.items():
+        item = existing.get(ticker)
+        if item:
+            item.ticker_name = ticker_name
+        else:
+            db.add(Basket(user_id=user_id, ticker=ticker, ticker_name=ticker_name))
+
+    db.commit()
+
+
+def add_auto_decision(
+    db: Session,
+    user_id: int,
+    ticker: str,
+    action: str,
+    reason: str,
+    detail: str = "",
+    ai_signal: str = "",
+    ai_confidence: float = 0.0,
+    strategy_id: str = "",
+    price: float = 0.0,
+) -> None:
+    db.add(
+        AutoTradeDecision(
+            user_id=user_id,
+            ticker=ticker,
+            action=action,
+            reason=reason,
+            detail=detail,
+            ai_signal=ai_signal,
+            ai_confidence=float(ai_confidence or 0.0),
+            strategy_id=strategy_id,
+            price=float(price or 0.0),
+        )
+    )
 
 
 async def get_market_close(ticker: str) -> int:
@@ -118,14 +191,36 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
 
 
         # ── 1. 워밍업 대기 ──────────────────────────────────────
-        print(f"[User {user_id}] 워밍업 데이터 대기 중...")
+        required_warmup = warmup_requirements.get(user_id) or {
+            ticker: get_warmup_count(
+                next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "ultra_safe")
+            )
+            for ticker in tickers
+        }
+        print(f"[User {user_id}] 워밍업 데이터 대기 중... required={required_warmup}")
 
-        warmup_events[user_id] = asyncio.Event()
+        if user_id not in warmup_events:
+            warmup_events[user_id] = asyncio.Event()
+            warmup_requirements[user_id] = required_warmup
+            warmup_received[user_id] = {}
+
+            warmup_db = SessionLocal()
+            try:
+                warmup_db.query(LiveCandle).filter(LiveCandle.ticker.in_(tickers)).delete(synchronize_session=False)
+                warmup_db.commit()
+            finally:
+                warmup_db.close()
+
         try:
-            await asyncio.wait_for(warmup_events[user_id].wait(), timeout=60)
-            print(f"[User {user_id}] 워밍업 데이터 수신 완료")
+            await asyncio.wait_for(warmup_events[user_id].wait(), timeout=90)
+            print(f"[User {user_id}] 모든 워밍업 데이터 수신 완료: {warmup_received.get(user_id, {})}")
         except asyncio.TimeoutError:
-            print(f"[User {user_id}] 워밍업 타임아웃")
+            missing = [
+                ticker
+                for ticker, count in required_warmup.items()
+                if warmup_received.get(user_id, {}).get(ticker, 0) < count
+            ]
+            print(f"[User {user_id}] 워밍업 타임아웃 | received={warmup_received.get(user_id, {})} | missing={missing}")
 
         # 1. 초기 데이터 로드 (과거 봉)
         # for ticker in tickers:
@@ -140,10 +235,11 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
             for ticker in tickers:
                 candles = db.query(LiveCandle)\
                     .filter(LiveCandle.ticker == ticker)\
-                    .order_by(LiveCandle.trade_datetime.asc())\
+                    .order_by(LiveCandle.trade_datetime.desc())\
                     .limit(get_warmup_count(
-                        next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "ultra_s")
+                        next((ts.strategy_id for ts in ticker_strategies if ts.ticker == ticker), "ultra_safe")
                     )).all()
+                candles = list(reversed(candles))
 
                 for candle in candles:
                     row = pd.Series({
@@ -193,6 +289,11 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                     market = ws.get_price(ticker)
                     if not market:
                         print(f" {ticker} : 시세없음 -> 스킵")
+                        add_auto_decision(
+                            db, user_id, ticker, "SKIP", "NO_MARKET_PRICE",
+                            "실시간 시세를 받지 못해 자동매매 판단을 건너뜀",
+                            strategy_id=strategies[ticker].__class__.__name__,
+                        )
                         continue
 
                     close = market["price"]
@@ -209,9 +310,16 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                     pred_map = {p["ticker"] : p for p in predictions}
                     signal = pred_map[ticker]["signal"]
                     confidence = pred_map[ticker]["confidence"]
+                    print(f"  {ticker}: AI {signal} | confidence={confidence:.3f}")
 
                     if confidence < config.min_confidence:
-                        print(f"  {ticker}: 확신도 부족 -> SKIP")
+                        detail = f"AI 확신도 {confidence:.3f}가 최소 기준 {config.min_confidence:.3f}보다 낮음"
+                        print(f"  {ticker}: 확신도 부족 ({confidence:.3f} < {config.min_confidence:.3f}) -> SKIP")
+                        add_auto_decision(
+                            db, user_id, ticker, "SKIP", "LOW_CONFIDENCE", detail,
+                            ai_signal=signal, ai_confidence=confidence,
+                            strategy_id=strategies[ticker].__class__.__name__, price=close,
+                        )
                         continue
                     # if signal == "HOLD":
                     #     print(f"  {ticker}: AI 관망 부족 -> HOLD")
@@ -219,6 +327,15 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
 
                     # 전략 필터 (봉 데이터 자동 누적됨)
                     orders = strategies[ticker].generate_orders(row, portfolio)
+                    if not orders:
+                        print(f"  {ticker}: 전략 조건 미충족 -> HOLD")
+                        add_auto_decision(
+                            db, user_id, ticker, "HOLD", "STRATEGY_CONDITION_NOT_MET",
+                            "AI 확신도는 기준을 통과했지만 전략이 BUY/SELL 주문 신호를 만들지 않음",
+                            ai_signal=signal, ai_confidence=confidence,
+                            strategy_id=strategies[ticker].__class__.__name__, price=close,
+                        )
+                        continue
 
                     # AI + 전략 일치 시 실행
                     for order in orders:
@@ -233,12 +350,26 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                             elif signal == "HOLD":
                                 qty = (a["amount"] // close) // 2 
                             else:
+                                detail = f"AI 신호 {signal}와 전략 신호 {order_signal}가 일치하지 않음"
+                                print(f"  {ticker}: AI({signal})와 전략({order_signal}) 불일치 -> HOLD")
+                                add_auto_decision(
+                                    db, user_id, ticker, "HOLD", "AI_STRATEGY_MISMATCH", detail,
+                                    ai_signal=signal, ai_confidence=confidence,
+                                    strategy_id=strategies[ticker].__class__.__name__, price=close,
+                                )
                                 continue
 
                         # 매도: 보유 수량 기반
                         elif order_signal == "SELL":
                             pos = portfolio.positions.get(ticker)
                             if not pos or pos.qty <= 0:
+                                print(f"  {ticker}: 전략 SELL 신호지만 보유 수량 없음 -> HOLD")
+                                add_auto_decision(
+                                    db, user_id, ticker, "HOLD", "NO_POSITION_TO_SELL",
+                                    "전략은 SELL 신호를 만들었지만 포트폴리오에 보유 수량이 없음",
+                                    ai_signal=signal, ai_confidence=confidence,
+                                    strategy_id=strategies[ticker].__class__.__name__, price=close,
+                                )
                                 continue
 
                             if signal == order_signal:
@@ -246,12 +377,33 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                             elif signal == "HOLD":
                                 qty = pos.qty // 2
                             else:
+                                detail = f"AI 신호 {signal}와 전략 신호 {order_signal}가 일치하지 않음"
+                                print(f"  {ticker}: AI({signal})와 전략({order_signal}) 불일치 -> HOLD")
+                                add_auto_decision(
+                                    db, user_id, ticker, "HOLD", "AI_STRATEGY_MISMATCH", detail,
+                                    ai_signal=signal, ai_confidence=confidence,
+                                    strategy_id=strategies[ticker].__class__.__name__, price=close,
+                                )
                                 continue
 
                         else:
+                            print(f"  {ticker}: 전략 {order_signal} 신호지만 매수 배분 없음 -> HOLD")
+                            add_auto_decision(
+                                db, user_id, ticker, "HOLD", "NO_BUY_ALLOCATION",
+                                "전략이 BUY 신호를 만들었지만 AI 매수 배분 대상에 포함되지 않음",
+                                ai_signal=signal, ai_confidence=confidence,
+                                strategy_id=strategies[ticker].__class__.__name__, price=close,
+                            )
                             continue
 
                         if qty <= 0:
+                            print(f"  {ticker}: 주문 가능 수량 0 -> HOLD")
+                            add_auto_decision(
+                                db, user_id, ticker, "HOLD", "ZERO_ORDER_QUANTITY",
+                                "배정 금액과 현재가 기준 주문 가능 수량이 0주",
+                                ai_signal=signal, ai_confidence=confidence,
+                                strategy_id=strategies[ticker].__class__.__name__, price=close,
+                            )
                             continue
                             
                         # 주문 실행 + 재시도 
@@ -297,6 +449,12 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
                                 strategy_id=strategies[ticker].__class__.__name__,
                                 status = order_status, 
                         ))
+                        add_auto_decision(
+                            db, user_id, ticker, "ORDER_SUBMITTED", order_status,
+                            f"{order_signal} 주문 시도 qty={int(qty)} amount={int(qty * close)}",
+                            ai_signal=signal, ai_confidence=confidence,
+                            strategy_id=strategies[ticker].__class__.__name__, price=close,
+                        )
                         print(f"{ticker}: {order_signal} | qty = {qty} | {qty*close: ,}원")
                             # TODO: KIS API 주문
                         
@@ -307,8 +465,9 @@ async def trading_loop(user_id: int, tickers: list[str], persona_id: int,
     except asyncio.CancelledError:
         await ws.disconnect()
         ws_task.cancel()
-        if user_id in warmup_events:
-            del warmup_events[user_id]
+        warmup_events.pop(user_id, None)
+        warmup_requirements.pop(user_id, None)
+        warmup_received.pop(user_id, None)
         print(f" [User {user_id}] 자동매매 중단됨")
 
 
@@ -444,8 +603,15 @@ async def run_once(
 
 
 # routes_trade.py에 추가
+class TradeBasketItem(BaseModel):
+    ticker: str
+    ticker_name: str = ""
+
+
 class TradeRequest(BaseModel):
     total_capital: Optional[int] = None  # None이면 KIS에서 자동 조회
+    basket: Optional[list[TradeBasketItem]] = None
+    tickers: Optional[list[str]] = None
     ticker_strategies: list[TickerStrategy] = []
     allocation: AllocationConfig = AllocationConfig()
 
@@ -469,11 +635,23 @@ async def start_trading(
     if user_id in active_tasks and not active_tasks[user_id].done():
         return {"status": "ALREADY_RUNNING", "message": "이미 자동매매 실행 중"}
 
-    items = db.query(Basket).filter(Basket.user_id == user_id).all()
+    sync_request_basket(db, user_id, payload)
+    items, excluded_manual_tickers = get_auto_trade_basket_items(db, user_id)
+    if not items and excluded_manual_tickers:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "자동매매 가능한 바구니 종목이 없습니다. 직접매매 종목은 자동매매에서 제외됩니다.",
+                "excluded_manual_tickers": excluded_manual_tickers,
+            },
+        )
     if not items:
         raise HTTPException(status_code=400, detail="바구니가 비어있습니다")
 
     tickers = [item.ticker for item in items]
+    if excluded_manual_tickers:
+        print(f"[User {user_id}] 직접매매 종목 자동매매 제외: {excluded_manual_tickers}")
+    print(f"[User {user_id}] 자동매매 대상 종목: {tickers}")
 
     warmup_requests = []
     for ticker in tickers:
@@ -488,6 +666,17 @@ async def start_trading(
             "count": get_warmup_count(strategy_id),
             "from_datetime": datetime.now().isoformat(),
         })
+
+    warmup_requirements[user_id] = {item["ticker"]: item["count"] for item in warmup_requests}
+    warmup_received[user_id] = {}
+    warmup_events[user_id] = asyncio.Event()
+
+    warmup_db = SessionLocal()
+    try:
+        warmup_db.query(LiveCandle).filter(LiveCandle.ticker.in_(tickers)).delete(synchronize_session=False)
+        warmup_db.commit()
+    finally:
+        warmup_db.close()
 
     command_queue.append({
         "command": "START",
@@ -505,6 +694,7 @@ async def start_trading(
         return {
             "status": "RUNNING",
             "tickers": tickers,
+            "excluded_manual_tickers": excluded_manual_tickers,
             "message": "데모 자동매매 시작: AI 서버에 START 커맨드를 전달했습니다.",
         }
 
@@ -523,6 +713,7 @@ async def start_trading(
     return {
         "status": "RUNNING",
         "tickers": tickers,
+        "excluded_manual_tickers": excluded_manual_tickers,
         "message": "자동매매 시작 (5분 주기)",
     }
     
@@ -572,7 +763,16 @@ async def execute_once(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    items = db.query(Basket).filter(Basket.user_id == current_user.id).all()
+    sync_request_basket(db, current_user.id, payload)
+    items, excluded_manual_tickers = get_auto_trade_basket_items(db, current_user.id)
+    if not items and excluded_manual_tickers:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "자동매매 가능한 바구니 종목이 없습니다. 직접매매 종목은 자동매매에서 제외됩니다.",
+                "excluded_manual_tickers": excluded_manual_tickers,
+            },
+        )
     if not items:
         raise HTTPException(status_code=400, detail="바구니가 비어있습니다")
 
@@ -585,6 +785,7 @@ async def execute_once(
         "job_id": job_id,
         "user_id": current_user.id,
         "tickers": tickers,
+        "excluded_manual_tickers": excluded_manual_tickers,
         "callback_url": f"{base_url}/ai/callback",
         "created_at": datetime.now().isoformat(),
         "status": "pending",
@@ -595,6 +796,7 @@ async def execute_once(
         "status": "QUEUED",
         "job_id": job_id,
         "tickers": tickers,
+        "excluded_manual_tickers": excluded_manual_tickers,
         "callback_url": f"{base_url}/ai/callback",
         "message": "AI 서버에 1회 분석/실행 커맨드를 전달했습니다. AI 서버가 결과를 콜백하면 리포트와 자동매매 판단에 반영됩니다.",
     }
@@ -608,6 +810,32 @@ async def get_status(current_user: User = Depends(get_current_user)):
         or (user_id in active_tasks and not active_tasks[user_id].done())
     )
     return {"status": "RUNNING" if is_running else "STOPPED"}
+
+@router.get("/decisions")
+def get_auto_trade_decisions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    decisions = db.query(AutoTradeDecision)\
+        .filter(AutoTradeDecision.user_id == current_user.id)\
+        .order_by(AutoTradeDecision.created_at.desc())\
+        .limit(100).all()
+
+    return [
+        {
+            "ticker": d.ticker,
+            "action": d.action,
+            "reason": d.reason,
+            "detail": d.detail,
+            "ai_signal": d.ai_signal,
+            "ai_confidence": d.ai_confidence,
+            "strategy_id": d.strategy_id,
+            "price": d.price,
+            "created_at": d.created_at.isoformat(),
+        }
+        for d in decisions
+    ]
+
 
 @router.get("/history")
 def get_trade_history(

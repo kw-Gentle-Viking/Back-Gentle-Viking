@@ -60,6 +60,7 @@ def push_command(payload: CommandRequest):
         "user_id": payload.user_id,
         "tickers": payload.tickers,
         "callback_url": payload.callback_url,
+        "warmup": payload.warmup,
         "created_at": datetime.now().isoformat(),
         "status": "pending",
     }

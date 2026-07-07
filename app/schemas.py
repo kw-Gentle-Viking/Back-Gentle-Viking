@@ -155,6 +155,7 @@ class CommandRequest(BaseModel):
     user_id: int
     tickers: list[str] = []
     callback_url: Optional[str] = None
+    warmup: list[dict] = []
 
 
 # ai_webhook 

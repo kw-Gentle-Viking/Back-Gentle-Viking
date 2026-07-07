@@ -28,21 +28,22 @@ STRATEGY_CONFIG = {
 }
 
 
+def _get_strategy_config(strategy_id: str):
+    return STRATEGY_CONFIG.get(strategy_id) or STRATEGY_CONFIG["conservative"]
+
+
 def create_strategy(symbol: str, strategy_id: str, params: dict = None):
-    cfg = STRATEGY_CONFIG.get(strategy_id)
-    if not cfg:
-        cfg = STRATEGY_CONFIG["conservative"]
+    cfg = _get_strategy_config(strategy_id)
     return cfg["class"](symbol=symbol)
 
 
 def get_warmup_count(strategy_id: str, params: dict = None) -> int:
-    cfg = STRATEGY_CONFIG.get(strategy_id, {})
-    calc = cfg.get("warmup", lambda p: 50)
-    return calc(params or {})
+    cfg = _get_strategy_config(strategy_id)
+    return cfg["warmup"](params or {})
 
 
 def get_timeframe(strategy_id: str) -> str:
-    cfg = STRATEGY_CONFIG.get(strategy_id, {})
-    return cfg.get("timeframe", "5m")
+    cfg = _get_strategy_config(strategy_id)
+    return cfg["timeframe"]
 
 ## multiframe 전략으로 진화 시킬 것 

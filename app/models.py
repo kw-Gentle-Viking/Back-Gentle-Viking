@@ -179,6 +179,35 @@ class Basket(Base):
 
     user: Mapped["User"] = relationship(back_populates="baskets")
 
+
+class ManualTradeLock(Base):
+    __tablename__ = "manual_trade_locks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "ticker", name="uq_manual_trade_locks_user_ticker"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    ticker: Mapped[str] = mapped_column(String(10))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class AutoTradeDecision(Base):
+    __tablename__ = "auto_trade_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    ticker: Mapped[str] = mapped_column(String(10))
+    action: Mapped[str] = mapped_column(String(20))  # HOLD | SKIP | ORDER_SUBMITTED
+    reason: Mapped[str] = mapped_column(String(80))
+    detail: Mapped[str] = mapped_column(Text, default="")
+    ai_signal: Mapped[str] = mapped_column(String(10), default="")
+    ai_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    strategy_id: Mapped[str] = mapped_column(String(50), default="")
+    price: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class TradeLog(Base):
     __tablename__ = "trade_logs"
 

@@ -6,10 +6,14 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
+from app.db import get_db
 from app.demo import demo_mode_enabled
+from app.dependencies import get_current_user
+from app.models import ManualTradeLock, User
 
 _env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=_env_path, override=True)
@@ -404,7 +408,11 @@ class OrderBody(BaseModel):
 
 
 @router.post("/trade/order")
-async def place_order(body: OrderBody):
+async def place_order(
+    body: OrderBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     token = await get_access_token()
     tr_id = "VTTC0012U" if body.side == "buy" else "VTTC0011U"
     ord_dvsn = "01" if body.price_type == "market" else "00"
@@ -427,7 +435,19 @@ async def place_order(body: OrderBody):
         )
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
-    return resp.json()
+
+    data = resp.json()
+    if data.get("rt_cd") == "0":
+        exists = db.query(ManualTradeLock).filter(
+            ManualTradeLock.user_id == current_user.id,
+            ManualTradeLock.ticker == body.code,
+        ).first()
+        if not exists:
+            db.add(ManualTradeLock(user_id=current_user.id, ticker=body.code))
+            db.commit()
+        print(f"[User {current_user.id}] 직접매매 종목 등록: {body.code}")
+
+    return data
 
 
 # ── 실시간 거래량 순위 ────────────────────────────────────────────────────────
